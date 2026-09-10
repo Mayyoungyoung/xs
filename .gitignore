@@ -10,3 +10,16 @@ venv/
 workspace/
 webapp/site-archive.tar.gz
 webapp/.sites-stage-*/
+
+.dev.vars
+.dev.vars.*
+*.tsbuildinfo
+
+# Desktop build products and isolated smoke-test data
+desktop-release/
+webapp/desktop-stage/
+webapp/desktop-smoke/
+webapp/desktop-test-*.json
+webapp/desktop-test-*.log
+webapp/desktop-runtime/
+webapp/desktop-test-*.bin

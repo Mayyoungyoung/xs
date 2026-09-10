@@ -10,6 +10,12 @@ const eslintConfig = defineConfig([
     // Default ignores of eslint-config-next:
     ".next/**",
     "out/**",
+    ".wrangler/**",
+    "dist/**",
+    "desktop-stage/**",
+    ".vinext/**",
+    ".sites-runtime/**",
+    ".sites-stage-*/**",
     "build/**",
     "next-env.d.ts",
   ]),

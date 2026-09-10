@@ -1,0 +1,22 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { writingGuidance } from "../lib/writing-guidance.ts";
+import { createBookWorkspace } from "../components/novel/book-workspace.ts";
+const history = { id: "h", title: "宫城旧事", genre: "古风权谋", premise: "女史官追查皇帝身世" };
+const space = { ...history, id: "s", title: "失联航船", genre: "科幻", premise: "飞船的能源不断消失" };
+test("empty-editor prompts match their module and adapt to genre, storyline and current chapter", () => {
+  assert.ok(writingGuidance("world", history).placeholder.includes("官制"));
+  assert.ok(writingGuidance("world", space).placeholder.includes("能源"));
+  assert.ok(!writingGuidance("characters", space).placeholder.includes("关键规则："));
+  assert.ok(writingGuidance("style", history).placeholder.includes("叙事视角"));
+  assert.ok(writingGuidance("outline", history).placeholder.includes("每章推进"));
+  assert.ok(!writingGuidance("unknown", history).placeholder.includes("世界规则"));
+  const workspace = createBookWorkspace(space); workspace.idea = "所有乘客的记忆被交换";
+  workspace.chapters.push({ id: "two", title: "第二章 失重", content: "", updatedAt: "" }); workspace.activeChapterId = "two";
+  workspace.plot.nodes = [{ title: "调查失联", note: "找到航船", chapter: "1" }, { title: "检查引擎", note: "发现异常读数", chapter: "2" }];
+  const current = writingGuidance("chapters", space, workspace);
+  assert.ok(current.placeholder.includes("第二章 失重")); assert.ok(current.placeholder.includes("检查引擎"));
+  assert.ok(current.request.includes("异常读数")); assert.ok(!current.placeholder.includes("世界内核"));
+  assert.ok(writingGuidance("characters", space, workspace).placeholder.includes("记忆被交换"));
+  assert.equal(workspace.chapters[1].content, "", "prompts never populate manuscript data");
+});

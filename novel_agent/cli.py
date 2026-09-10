@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from .agents import AgentRuntime
 from .llm import LLMClient, ModelRoute
@@ -18,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         help="用于本次创作的 DeepSeek 模型",
     )
+    parser.add_argument("--mock", action="store_true", help="明确使用演示模型，不发送 API 请求")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="创建本地 workspace 目录")
@@ -64,13 +66,33 @@ def build_parser() -> argparse.ArgumentParser:
     demo = sub.add_parser("demo", help="按顺序跑一遍最小闭环")
     demo.add_argument("book_id")
 
+    revise = sub.add_parser("revise", help="按修改意见生成新版本，保留原稿")
+    revise.add_argument("book_id")
+    revise.add_argument("artifact_id")
+    revise.add_argument("--note", default="")
+    export = sub.add_parser("export", help="导出已确认章节为 Markdown")
+    export.add_argument("book_id")
+    export.add_argument("--output", required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
+    try:
+        run(argv)
+    except (ValueError, KeyError, RuntimeError, OSError) as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        print("\n已停止，已保存内容保留。", file=sys.stderr)
+        raise SystemExit(130) from None
+
+
+def run(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     store = BookStore()
-    llm = LLMClient(ModelRoute(model=args.model))
+    llm = LLMClient(ModelRoute(model=args.model), mock=True if args.mock else None)
+    if llm.mock and args.command not in {"init", "list-books", "create-book", "artifacts", "export", "reference"}:
+        print("[演示模式] 未调用真实模型，生成内容仅用于验证流程。")
     runtime = AgentRuntime(store, llm)
     workflow = Workflow(store, runtime)
 
@@ -102,6 +124,25 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     book = store.get_book(args.book_id)
+
+    if args.command == "revise":
+        review_gate(store, workflow.revise(book, args.artifact_id, args.note))
+        return
+
+    if args.command == "export":
+        latest = {}
+        for artifact in store.list_artifacts(book.id, "chapter_draft"):
+            if artifact.status == "approved":
+                latest[artifact.metadata.get("chapter_no", 1)] = artifact
+        if not latest:
+            raise ValueError("没有已确认的章节，请先 approve 确认稿件")
+        output = Path(args.output)
+        if output.exists():
+            raise ValueError("目标文件已存在，请使用新的导出文件名")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(f"# {book.title}\n\n" + "\n\n".join(f"## 第 {number} 章\n\n{latest[number].content}" for number in sorted(latest)), encoding="utf-8")
+        print(f"已导出 {len(latest)} 章：{output.resolve()}")
+        return
 
     if args.command == "reference":
         text = args.text
@@ -152,14 +193,18 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "demo":
         steps = [
-            workflow.research(book, book.genre or book.premise or book.title),
-            workflow.style_guide(book, "节奏明快，冲突明确，章尾留下强钩子。"),
-            workflow.world(book),
-            workflow.characters(book),
-            workflow.outline(book),
+            lambda: workflow.research(book, book.genre or book.premise or book.title),
+            lambda: workflow.style_guide(book, "节奏明快，冲突明确，章尾留下强钩子。"),
+            lambda: workflow.world(book),
+            lambda: workflow.characters(book),
+            lambda: workflow.outline(book),
         ]
-        for artifact in steps:
+        for step in steps:
+            artifact = step()
             review_gate(store, artifact)
+            if artifact.status != "approved":
+                print("当前步骤尚未确认，流程已暂停。可用对应命令或 revise 继续。")
+                return
         for artifact in workflow.draft_chapter(book, 1):
             review_gate(store, artifact)
         return
@@ -173,13 +218,20 @@ def review_gate(store: BookStore, artifact) -> None:
     print(artifact.content)
     print("-" * 72)
     while True:
-        choice = input("闸口操作 approve / reject / skip：").strip().lower()
+        try:
+            choice = input("闸口操作 approve / reject / skip：").strip().lower()
+        except EOFError:
+            print("输入结束，保留待确认产物。")
+            return
         if choice in {"approve", "a"}:
             store.update_artifact_status(artifact, "approved")
             print(f"已确认：{artifact.id}")
             return
         if choice in {"reject", "r"}:
-            note = input("请输入修改意见：").strip()
+            try:
+                note = input("请输入修改意见：").strip()
+            except EOFError:
+                note = ""
             artifact.metadata["revision_request"] = note
             store.update_artifact_status(artifact, "revision_requested")
             print(f"已记录修改意见：{artifact.id}")

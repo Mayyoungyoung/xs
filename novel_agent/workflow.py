@@ -12,7 +12,7 @@ class Workflow:
 
     def research(self, book: Book, topic: str) -> Artifact:
         task = (
-            "生成一份同类题材风向报告。必须包含：热门标签、高频元素、核心爽点、读者避雷点、"
+            "生成一份题材创作调研建议。当前没有联网检索，不得声称实时榜单或真实市场趋势，必须标注推断。包含：候选标签、常见元素、核心爽点、读者避雷点、"
             "差异化切入建议。不要抓取或复刻任何小说正文。\n"
             f"检索主题：{topic}"
         )
@@ -67,7 +67,25 @@ class Workflow:
         content = self.runtime.run_agent(book, "architect", task, context)
         return self.store.save_artifact(book.id, "chapter_outline", "分卷与章节大纲", content)
 
+    def revise(self, book: Book, artifact_id: str, note: str = "") -> Artifact:
+        source = next((a for a in self.store.list_artifacts(book.id) if a.id == artifact_id), None)
+        if source is None:
+            raise ValueError("当前书籍中没有此产物")
+        if source.kind in {"reference_material", "chapter_snapshot"}:
+            raise ValueError("借鉴资料与剧情快照不能直接重写，请修改原始资料或重新生成章节")
+        instruction = note.strip() or source.metadata.get("revision_request", "")
+        if not instruction:
+            raise ValueError("请使用 --note 提供修改要求，或先在闸口记录意见")
+        role = "writer" if source.kind == "chapter_draft" else "continuity" if source.kind == "continuity_review" else "architect"
+        content = self.runtime.run_agent(book, role, f"根据修改要求重写当前产物，只输出新版本。\n修改要求：{instruction}\n原版本：\n{source.content}", self._latest_context(book.id, ["world_bible", "character_cards", "chapter_outline", "style_guide"]))
+        return self.store.save_artifact(book.id, source.kind, source.title + "（修订）", content, metadata={**source.metadata, "revised_from": source.id, "revision_request": instruction})
+
     def draft_chapter(self, book: Book, chapter_no: int) -> list[Artifact]:
+        if chapter_no < 1:
+            raise ValueError("章节编号必须大于 0")
+        required = [kind for kind in ["world_bible", "character_cards", "chapter_outline"] if not self.store.latest_artifact(book.id, kind)]
+        if required:
+            raise ValueError("请先生成并 approve 确认世界观、人物与章节大纲。尚缺：" + ", ".join(required))
         context = self._chapter_context(book.id, chapter_no)
         draft_task = (
             f"根据上下文写第 {chapter_no} 章正文初稿。要求有对话、环境描写、心理活动和章尾钩子，"
@@ -128,7 +146,7 @@ class Workflow:
     def _reference_context(self, book_id: str, scope: str) -> str:
         references = [
             item for item in self.store.list_artifacts(book_id, "reference_material")
-            if item.metadata.get("scope") == scope
+            if item.metadata.get("scope") == scope and item.status != "revision_requested"
         ][-6:]
         if not references:
             return ""
@@ -141,10 +159,12 @@ class Workflow:
     def _chapter_context(self, book_id: str, chapter_no: int) -> str:
         kinds = ["world_bible", "character_cards", "chapter_outline", "style_guide"]
         blocks = [self._latest_context(book_id, kinds)]
-        snapshots = [
-            item for item in self.store.list_artifacts(book_id, "chapter_snapshot")
-            if item.metadata.get("chapter_no", 0) < chapter_no
-        ][-5:]
+        latest_snapshots = {}
+        for item in self.store.list_artifacts(book_id, "chapter_snapshot"):
+            number = item.metadata.get("chapter_no", 0)
+            if 0 < number < chapter_no and item.status == "approved":
+                latest_snapshots[number] = item
+        snapshots = [latest_snapshots[number] for number in sorted(latest_snapshots)[-5:]]
         if snapshots:
             blocks.append("## 最近章节快照\n" + "\n\n".join(item.content for item in snapshots))
         return "\n\n".join(block for block in blocks if block)

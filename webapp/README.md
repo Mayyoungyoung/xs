@@ -1,117 +1,30 @@
-# vinext-starter
+# 墨脉小说工作台
 
-A clean full-stack starter running on [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and Drizzle support.
+完整操作说明见 [项目 README](../README.md)。
 
-## Prerequisites
+Windows 安装包：安装 Inno Setup 6/7 后运行 `npm run desktop:installer`，产物为 `../desktop-release/Momai-Setup-1.1.0-x64.exe`，直接发送此文件即可。安装向导支持选择安装位置；软件设置中可选择空文件夹迁移全部小说资料、备份和加密密钥。定位配置与缓存仍在系统用户目录。网页版完整 JSON 备份可导入桌面版。程序独立运行，不依赖开发服务器。
 
-- Node.js `>=22.13.0`
-- Windows, macOS, or Linux; Git is required only for publishing, and Bash is not required for initialization or the project commands
+空白填写提示根据当前模块、书籍题材与已有创作内容变化。世界线路线图支持放大、缩小、适应宽度、恢复原比例和展开大图，按书保存缩放设置。
 
-## Sites Lifecycle
-
-The bundled Sites initializer copies this starter into the project and runs its locked dependency install before returning the checkout. Edit the source under `app/`, use `npm run dev` for the Codex local preview, and run the project validation before hosting. The remote Sites builder also runs `npm run build` against the pushed commit. Do not rerun the dependency install unless dependencies are absent or the lockfile changed.
-
-This starter does not use `wrangler.jsonc`.
-
-`install:ci` runs `npm ci` once against this checkout's bundled lockfile, explicitly targeting the project and disabling parent-workspace discovery. It includes dev and optional dependencies required for builds and previews even when production/omit settings would exclude them. It defaults Sharp to prebuilt binaries unless the caller explicitly configures Sharp or a source build. It uses `--prefer-offline --no-audit --no-fund`, reuses the configured npm cache, and leaves network concurrency, retries, timeouts, and lifecycle-script policy to npm's configuration. Retain the installer session until it finishes; do not overlap installers for the same checkout.
-
-`scripts/sites-env.mjs` preserves the caller's HOME, npm cache, proxy, XDG, and temporary-directory configuration while defaulting Wrangler and Miniflare state to the checkout. If npm reports an unwritable cache, select a writable path with `npm_config_cache` for that install. The `dev` and `start` scripts also keep Wrangler logs inside the checkout. Generated `.sites-runtime/` and `.wrangler/` directories are disposable and ignored by Git.
-
-`npm run dev` uses `vinext dev` for the live Vite preview with HMR, starting at port 5173. Vinext records the running server in ignored `.vinext/` state and rejects another start for the same checkout while that process is alive; reuse its printed URL. It recovers stale state after a stopped process. Pass `--port <port>` or `--hostname <host>` after `npm run dev --` when needed; keep Codex previews on loopback. Like the Sites package, this relies on Vinext's advisory lock; exactly simultaneous starts can race.
-
-The bundled Sites Vite plugin simulates ChatGPT sign-in only for loopback development requests. Visit `/signin-with-chatgpt?return_to=/` to sign in as `local_seedy` (`seedy@sites.test`, display name `Seedy`) and `/signout-with-chatgpt?return_to=/` to sign out. The development cookie preserves that identity across server restarts. This does not exercise real ChatGPT OAuth and is not included in production builds; hosted authentication remains dispatch-owned.
-
-The Worker uses `vinext/server/fetch-handler`, including Vinext's config-aware image handling. After building, `npm start` runs that Worker locally through Wrangler on `127.0.0.1`, sharing `.wrangler/state` with dev preview and local D1 migrations; it does not deploy the site or simulate sign-in. Use the URL printed by the server. Pass `npm start -- --port <port>` to select a different built-preview port.
-
-Local previews use Miniflare's placeholder `Request.cf` metadata without a network lookup. Set `CLOUDFLARE_CF_FETCH_ENABLED=true` to opt into fetching preview metadata; this setting does not change hosted request metadata.
-
-Local tool usage metrics are disabled by default. Set `WRANGLER_SEND_METRICS=true` to opt in.
-
-## Included Shape
-
-- edit site code under `app/`
-- `app/chatgpt-auth.ts` provides optional dispatch-owned ChatGPT sign-in helpers
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/index.ts` reads the D1 binding from the Cloudflare Worker environment
-- `db/schema.ts` starts intentionally empty
-- `@cloudflare/workers-types` provides Worker types; `cloudflare-env.d.ts` declares optional `DB`/`BUCKET` bindings—update these declarations if binding names change
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
-
-The user ID is stable for the same user on the same Site and different across Sites. Use it as the durable user key; use email and name for display or contact purposes.
-
-SIWC-authenticated workspace sites may also receive `oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty `name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by `oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```powershell
+npm ci
+# 启动后直接在界面「模型设置」填写 API Key；也支持 .env.local
+npm run dev
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+默认地址 http://localhost:5173。Node.js 22.15+。
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs optional or required ChatGPT sign-in:
+小说工作区按模块切换，一次只显示当前模块。故事蓝图只编辑构想和偏好；世界线只保留「故事路线图」与「AI 主线共创」。每条主线、支线各占一行，通过共享事件交汇；旧的时间说明收在「原有剧情笔记」，既有剧情与讨论数据保留。世界观、人物角色、文笔文风、卷章大纲、章节正文和借鉴库分别独立。通用共创助手默认收起，需要时从页面上方打开。
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use the returned `userId` as the stable user key for user-owned records; do not use email as a durable identifier.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send anonymous visitors through Sign in with ChatGPT.
-- In a Server Component, start sign-in with `<a href={chatGPTSignInPath(returnTo)} target="_top">`. The auth helper module is server-only; do not import it into a Client Component.
-- Do not use `fetch`, XHR, a client-side router, or a framework link that can prefetch the sign-in route. SIWC must start as a top-level navigation.
-- Never request the AuthAPI authorization endpoint directly. The dispatch-owned `/signin-with-chatgpt` route must start the SIWC flow.
-- Use `chatGPTSignOutPath(returnTo)` for browser sign-out links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because they depend on per-request identity headers.
+进入一本小说的「世界线」，切换到「AI 主线共创」，可在「主线共创室」和 AI 连续讨论主角目标、冲突、转折与结局。点击「生成主线方案」整理讨论结果；方案支持直接修改，也可继续讨论后点击「按讨论更新方案」。只有「采纳并更新剧情图」才会替换正式剧情，修改前自动保存故事快照。每本书分别保存讨论、输入草稿和待采纳方案，刷新后可继续；停止或失败时保留输入供重试。模型请求使用最近 20 条讨论及当前书籍设定，完整讨论记录保存在本地。
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the OAuth cookies, and identity header injection. Do not implement app routes for those reserved paths. Routes that do not import and call the helper remain anonymous-compatible.
+在路线图添加一条或多条主线，填写各自目标，再添加剧情事件。支线从其他故事线已有的事件衍生；点击某条线的「交汇」可关联其他线已有的同一事件，修改与完成状态共享。事件按推进顺序排列，可填写计划章节和「待写 / 正在写 / 已写完」状态。每本书最多 16 条故事线、80 个事件。
 
-SIWC establishes identity only; it does not prove workspace membership. Use the Sites hosting platform's access policy controls for workspace-wide restrictions, or enforce explicit server-side membership or allowlist checks.
+章节正文中的「本章推进哪些剧情」按计划章节推荐事件，也支持多选修改。生成要求会携带本章目标、主支线关系和未来计划，要求模型不提前完成后续事件、不重复当前正文。生成或采纳不会自动标记完成；作者确认内容完成后点击「确认本章事件已写完」，路线图同步进度。AI 方案替换了章节已绑定的事件时会提示重新安排，未重新安排前不能生成。实际情节质量仍需作者检查，可使用连续性检查发现偏离计划。
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write actions tied to the current ChatGPT user. Leave public content anonymous.
+- `npm test`：数据、接口及模拟 DOM 交互回归测试；不调用真实模型。
+- `npm run lint`、`npm run typecheck`：代码检查。
+- `npm run build`：生成 Worker 与前端资源。
+- `npm start`：本地运行已构建版本；修改源代码后需重新构建。
 
-## Local D1 migrations
-
-For a D1-backed local preview, generate SQL with `npm run db:generate`. Build once through the Sites skill's build entrypoint (or `npm run build` for standalone use) to generate `dist/server/wrangler.json`, rebuilding if bindings change. From the project root, apply each pending migration in order:
-
-```sh
-node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_example.sql
-```
-
-Replace the filename with the pending migration and `DB` with your D1 binding name if different. Use `.wrangler/state`, not `.wrangler/state/v3`; Wrangler adds the versioned directories. Do not replay migrations already applied locally. This updates only the preview database; publishing applies production migrations separately.
-
-## Diagnostic Commands
-
-- `npm run install:ci`: perform the one locked dependency install
-- `npm run dev`: start the Vite/Vinext development server
-- `npm run build`: build the deployable Sites artifact
-- `npm run start`: preview the built Worker locally with D1/R2 support
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-When using the Sites plugin, follow its skill instructions for installation, builds, and publishing. These npm commands remain available for standalone use.
-
-Like the Sites package, `npm run build` runs `vinext build` directly; it does not require a host `timeout` command.
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+保留 Vite/Vinext 与 Sites 集成，`.openai/hosting.json` 使用既有项目编号。当前未使用 D1/R2，书架数据在浏览器 IndexedDB 中；不会自动同步到其他设备或地址。开发和构建后的不同端口是独立书架，可用完整 JSON 备份迁移。

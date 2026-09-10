@@ -4,115 +4,123 @@ import { useState } from "react";
 import { BookMarked, BookOpen, Box, Check, CircleUserRound, Clock3, Download, Feather, GitCommit, Library, LoaderCircle, Plus, Save, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { assetInitialContent } from "./book-workspace";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
+import { withSnapshot, type BookWorkspace } from "./book-workspace";
+import { writingGuidance } from "@/lib/writing-guidance";
+import { downloadText, wordCount } from "@/lib/novel-data";
 import type { BookProject } from "./bookshelf";
 import type { ReferenceItem, ReferenceScope } from "./reference-library-dialog";
+import { ChapterRoadmap } from "./chapter-roadmap";
+import { chapterPlan } from "@/lib/story-roadmap";
 
 type Props = {
-  book: BookProject;
-  type: string;
-  content?: string;
+  embedded?: boolean;
+  book: BookProject; type: string; workspace: BookWorkspace; busy: boolean; saveState: string;
+  initialProposal?: string; onProposalConsumed: () => void;
   references: ReferenceItem[];
-  onContentChange: (content: string) => void;
+  onContentChange: (content: string, snapshot?: boolean) => void;
+  onWorkspaceChange: (patch: Partial<BookWorkspace> | ((w: BookWorkspace) => BookWorkspace)) => void;
   onOpenReferences: (scope: ReferenceScope) => void;
   onRemoveReference: (reference: ReferenceItem) => void;
   onGenerate: (prompt: string, task: string) => Promise<string>;
   onNotify: (message: string) => void;
 };
-
 type LocalDirectoryHandle = {
   getFileHandle: (name: string, options: { create: boolean }) => Promise<{ createWritable: () => Promise<{ write: (data: string) => Promise<void>; close: () => Promise<void> }> }>;
 };
-
 const configs: Record<string, { title: string; desc: string; icon: typeof Box; scope: ReferenceScope; task: string }> = {
-  world: { title: "世界观", desc: "定义这个世界能发生什么、不能发生什么，以及一切力量的代价。", icon: Box, scope: "world", task: "chat" },
-  characters: { title: "人物角色", desc: "让人物拥有独立欲望、恐惧、秘密与会发生变化的关系。", icon: CircleUserRound, scope: "character", task: "character_design" },
-  timeline: { title: "世界线", desc: "固定历史事件与故事现在，避免时间、年龄和因果关系漂移。", icon: Clock3, scope: "world", task: "chat" },
-  style: { title: "文风指纹", desc: "把抽象的“像某种作品”转化为可执行、可调节的写作参数。", icon: Feather, scope: "style", task: "style_fingerprint" },
-  outline: { title: "卷章大纲", desc: "把主线和支线落实到每一卷、每一章的冲突、转折与钩子。", icon: Library, scope: "plot", task: "plot_update" },
-  chapters: { title: "章节正文", desc: "在设定、人物、大纲和文风约束下写作，并保留每次修改。", icon: BookOpen, scope: "plot", task: "chat" },
+  world: { title: "世界观", desc: "定义世界规则、社会运行与力量的代价。", icon: Box, scope: "world", task: "world_design" },
+  characters: { title: "人物角色", desc: "记录欲望、恐惧、秘密与关系变化。", icon: CircleUserRound, scope: "character", task: "character_design" },
+  timeline: { title: "时间与因果", desc: "记录故事前史、事件顺序与人物年龄，对照剧情图检查因果。", icon: Clock3, scope: "plot", task: "timeline_design" },
+  style: { title: "文笔文风", desc: "形成可执行的视角、节奏、意象与对话原则。", icon: Feather, scope: "style", task: "style_fingerprint" },
+  outline: { title: "卷章大纲", desc: "把主支线落实为章节冲突、转折与钩子。", icon: Library, scope: "plot", task: "outline_design" },
+  chapters: { title: "章节正文", desc: "按章节写作，参考设定和前文，预览后采纳生成内容。", icon: BookOpen, scope: "plot", task: "chapter_write" },
 };
-
-export function AssetWorkbench({ book, type, content, references, onContentChange, onOpenReferences, onRemoveReference, onGenerate, onNotify }: Props) {
+export function AssetWorkbench({ embedded = false, book, type, workspace, busy, saveState, initialProposal = "", onProposalConsumed, references, onContentChange, onWorkspaceChange, onOpenReferences, onRemoveReference, onGenerate, onNotify }: Props) {
   const config = configs[type] ?? configs.world;
   const Icon = config.icon;
-  const [loading, setLoading] = useState(false);
   const [savingLocal, setSavingLocal] = useState(false);
-  const [request, setRequest] = useState(placeholderFor(type));
-  const editorContent = content ?? assetInitialContent(type, book);
+  const guidance = writingGuidance(type, book, workspace);
+  const [customRequest, setRequest] = useState<string | null>(null);
+  const request = customRequest ?? guidance.request;
+  const [error, setError] = useState("");
+  const chapter = workspace.chapters.find((c) => c.id === workspace.activeChapterId) ?? workspace.chapters[0];
+  const editorContent = type === "chapters" ? chapter.content : workspace.assets[type] ?? "";
+  const versionKey = type === "chapters" ? `chapter:${chapter.id}` : type;
+  const proposedContent = workspace.proposals[versionKey] ?? initialProposal;
+  const review = workspace.reviews[versionKey] ?? "";
+  function setProposal(content: string) { onWorkspaceChange((w) => ({ ...w, proposals: { ...w.proposals, [versionKey]: content } })); }
+  function setReview(content: string) { onWorkspaceChange((w) => ({ ...w, reviews: { ...w.reviews, [versionKey]: content } })); }
+  const versions = workspace.assetVersions[versionKey] ?? [];
   const scopedReferences = references.filter((item) => item.scope === config.scope);
 
-  async function generate() {
-    if (!request.trim()) return;
-    setLoading(true);
-    try {
-      const result = await onGenerate(request, config.task);
-      onContentChange(result);
-      onNotify(`${config.title}已生成新版本`);
-    } finally { setLoading(false); }
-  }
-
-  async function saveChapterToDirectory() {
-    const picker = window as typeof window & { showDirectoryPicker?: () => Promise<LocalDirectoryHandle> };
-    if (!picker.showDirectoryPicker) {
-      downloadChapter(editorContent, book.title);
-      onNotify("当前浏览器不支持目录写入，已改为下载 Markdown 文件");
-      return;
+  async function generate(task = config.task, prompt = request) {
+    if (!prompt.trim() || busy) return;
+    setError("");
+    if (type === "chapters") {
+      const plan = chapterPlan(workspace);
+      if (plan.missing.length) { setError("本章绑定的事件已不存在，请重新选择推进事件。"); return; }
+      if (plan.roadmap.lines.length && !plan.manual) onWorkspaceChange((current) => ({ ...current, chapters: current.chapters.map((item) => item.id === chapter.id ? { ...item, plotEventIds: plan.ids } : item) }));
     }
+    try {
+      const result = await onGenerate(prompt, task);
+      if (task === "continuity_review") setReview(result); else setProposal(result);
+      onNotify(task === "continuity_review" ? "审查完成，正文保持原样" : "已生成，请预览后替换或追加");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "生成失败，请重试。"); }
+  }
+  function applyProposal(append = false) {
+    onContentChange(append ? [editorContent, proposedContent].filter(Boolean).join("\n\n") : proposedContent, true);
+    setProposal(""); onProposalConsumed(); onNotify("已采纳，修改前内容可在版本记录恢复");
+  }
+  function addChapter() {
+    const next = { id: crypto.randomUUID(), title: `第 ${workspace.chapters.length + 1} 章`, content: "", updatedAt: new Date().toISOString() };
+    onWorkspaceChange((w) => ({ ...w, chapters: [...w.chapters, next], activeChapterId: next.id }));
+  }
+  function deleteChapter() {
+    if (!window.confirm(`删除“${chapter.title}”？删除前会保留完整故事快照。`)) return;
+    onWorkspaceChange((w) => ({ ...withSnapshot(w, `删除章节：${chapter.title}`), chapters: w.chapters.filter((c) => c.id !== chapter.id), activeChapterId: w.chapters.find((c) => c.id !== chapter.id)!.id }));
+  }
+  function exportBook() {
+    const text = `# ${book.title}\n\n${workspace.chapters.map((c) => `## ${c.title}\n\n${c.content}`).join("\n\n---\n\n")}`;
+    downloadText(text, `${book.title}-全书.md`); onNotify("已导出全部章节");
+  }
+  async function saveToDirectory() {
+    const filename = `${book.title}-${type === "chapters" ? chapter.title : config.title}.md`.replace(/[\\/:*?"<>|]/g, "_");
+    const picker = window as typeof window & { showDirectoryPicker?: () => Promise<LocalDirectoryHandle> };
+    if (!picker.showDirectoryPicker) { downloadText(editorContent, filename); onNotify("已下载 Markdown 文件"); return; }
     setSavingLocal(true);
     try {
       const directory = await picker.showDirectoryPicker();
-      const filename = `${safeFilename(book.title)}-第1章.md`;
       const file = await directory.getFileHandle(filename, { create: true });
-      const writable = await file.createWritable();
-      await writable.write(editorContent);
-      await writable.close();
-      onNotify(`已保存到所选目录：${filename}`);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      onNotify("保存到本地目录失败，请重新选择一个可写目录");
-    } finally { setSavingLocal(false); }
+      const writable = await file.createWritable(); await writable.write(editorContent); await writable.close();
+      onNotify(`已保存：${filename}`);
+    } catch (reason) { if (!(reason instanceof DOMException && reason.name === "AbortError")) setError("目录写入失败，请使用导出文件或重选可写目录。"); }
+    finally { setSavingLocal(false); }
   }
-
   return <div className="asset-workbench">
-    <div className="page-heading asset-heading"><div><div className="eyebrow">{book.title} / {config.title}</div><h1>{config.title}</h1><p>{config.desc}</p></div><div className="heading-actions"><Button variant="outline" onClick={() => onOpenReferences(config.scope)}><BookMarked />添加借鉴</Button>{type === "chapters" && <Button variant="outline" onClick={() => void saveChapterToDirectory()} disabled={savingLocal}>{savingLocal ? <LoaderCircle className="spin" /> : <Download />}保存到本地路径</Button>}<Button className="ink-button" onClick={generate} disabled={loading}>{loading ? <LoaderCircle className="spin" /> : <Sparkles />}AI 生成新版</Button></div></div>
-    <section className="asset-layout">
-      <div className="asset-editor">
-        <div className="asset-editor-head"><span><Icon />当前版本</span><div><em>本书独立保存</em><Button size="sm" variant="outline" onClick={() => { onContentChange(editorContent); onNotify("已保存到这本书的工作区"); }}><Save />保存</Button></div></div>
-        <Textarea value={editorContent} onChange={(event) => onContentChange(event.target.value)} aria-label={`${config.title}编辑器`} />
-        <footer><span><Check />已保存至《{book.title}》</span><span>{editorContent.length.toLocaleString()} 字</span></footer>
+    <div className={embedded ? "worldline-view-heading asset-heading" : "page-heading asset-heading"}><div>{!embedded && <div className="eyebrow">{book.title} / {config.title}</div>}{embedded ? <h2>{config.title}</h2> : <h1>{config.title}</h1>}<p>{config.desc}</p></div><div className="heading-actions"><Button variant="outline" onClick={() => void saveToDirectory()} disabled={savingLocal}>{savingLocal ? <LoaderCircle className="spin" /> : <Download />}导出文件</Button></div></div>
+    {type === "chapters" && <section className="chapter-toolbar">
+      <NativeSelect aria-label="当前章节" disabled={busy} value={chapter.id} onChange={(e) => onWorkspaceChange({ activeChapterId: e.target.value })}>{workspace.chapters.map((c) => <NativeSelectOption value={c.id} key={c.id}>{c.title} · {wordCount(c.content)} 字</NativeSelectOption>)}</NativeSelect>
+      <input aria-label="章节标题" value={chapter.title} onChange={(e) => { const title = e.target.value; onWorkspaceChange((w) => ({ ...w, chapters: w.chapters.map((c) => c.id === chapter.id ? { ...c, title: title || "未命名章节" } : c) })); }} />
+      <Button variant="outline" disabled={busy} onClick={addChapter}><Plus />新章节</Button>
+      <Button variant="outline" disabled={busy || workspace.chapters.length < 2} onClick={deleteChapter}><Trash2 />删除本章</Button>
+      <Button variant="outline" onClick={exportBook}><Download />导出全书</Button>
+    </section>}
+    {type === "chapters" && <ChapterRoadmap workspace={workspace} busy={busy} onChange={onWorkspaceChange} />}
+    <section className="asset-layout"><div>
+      <div className="asset-editor"><div className="asset-editor-head"><span><Icon />{type === "chapters" ? chapter.title : "当前内容"}</span><Button size="sm" variant="outline" onClick={() => { onContentChange(editorContent, true); onNotify("已创建当前内容快照"); }}><Save />保存快照</Button></div>
+        <Textarea value={editorContent} placeholder={guidance.placeholder} onChange={(event) => onContentChange(event.target.value)} aria-label={`${config.title}编辑器`} />
+        <footer><span><Check />{saveState}</span><span>{wordCount(editorContent).toLocaleString()} 字</span></footer>
       </div>
-      <aside className="asset-side">
-        <section className="asset-ai-card"><header><span><Sparkles /></span><div><strong>让 AI 修改</strong><p>用自然语言描述，不需要写提示词</p></div></header><Textarea value={request} onChange={(event) => setRequest(event.target.value)} /><Button onClick={generate} disabled={loading}>{loading ? <LoaderCircle className="spin" /> : <Sparkles />}生成并替换编辑器</Button></section>
-        <section className="asset-reference-card"><header><strong>本页借鉴</strong><button onClick={() => onOpenReferences(config.scope)}><Plus />添加</button></header>{scopedReferences.length === 0 ? <div className="asset-no-reference"><BookMarked /><p>尚未选择借鉴资料</p></div> : scopedReferences.map((item) => <div className="asset-reference-row" key={`${item.id}-${item.scope}`}><span>{item.source === "网页搜索" ? "网" : item.source === "本地文件" ? "本" : "书"}</span><div><strong>{item.title}</strong><small>{item.source}</small></div><button className="remove-reference" onClick={() => onRemoveReference(item)} aria-label={`删除借鉴 ${item.title}`}><Trash2 /></button></div>)}</section>
-        <section className="asset-version-card"><strong>最近版本</strong><div><GitCommit /><span>当前编辑版本<small>刚刚</small></span></div><div><GitCommit /><span>AI 生成版本<small>保存在《{book.title}》内</small></span></div></section>
-      </aside>
-    </section>
+      {error && <p className="ai-error" role="alert">{error}</p>}
+      {proposedContent && <section className="generation-preview"><header><h2>生成预览</h2><span>采纳前不会修改当前稿件</span></header><Textarea aria-label="生成结果预览" value={proposedContent} onChange={(e) => setProposal(e.target.value)} /><div><Button disabled={busy} onClick={() => applyProposal()}>替换当前内容</Button><Button disabled={busy} variant="outline" onClick={() => applyProposal(true)}>追加到末尾</Button><Button variant="ghost" onClick={() => { setProposal(""); onProposalConsumed(); }}>放弃本次结果</Button></div></section>}
+      {review && <section className="generation-preview"><h2>连续性审查</h2><div className="review-text">{review}</div><Button variant="outline" onClick={() => downloadText(review, `${book.title}-${chapter.title}-审查.md`)}>导出审查</Button></section>}
+    </div><aside className="asset-side">
+      <section className="asset-ai-card"><header><span><Sparkles /></span><div><strong>与 AI 一起修改</strong><p>模型会参考本书设定与前文</p></div></header><Textarea aria-label="本页生成要求" value={request} onChange={(e) => setRequest(e.target.value)} /><Button onClick={() => void generate()} disabled={busy || !request.trim()}>{busy ? <LoaderCircle className="spin" /> : <Sparkles />}生成预览</Button>
+        {type === "chapters" && <div className="chapter-ai-actions"><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void generate("chapter_polish", "润色当前完整章节，保留剧情事实，只输出完整正文。")}>润色本章</Button><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void generate("continuity_review", "结合本书设定与前文审查当前章节，给出具体位置及修改建议。")}>连续性检查</Button></div>}
+      </section>
+      <section className="asset-reference-card"><header><strong>本页借鉴</strong><button onClick={() => onOpenReferences(config.scope)}><Plus />添加</button></header>{scopedReferences.length === 0 ? <div className="asset-no-reference"><BookMarked /><p>尚未选择借鉴资料</p></div> : scopedReferences.map((item) => <div className="asset-reference-row" key={`${item.id}-${item.scope}`}><div><strong>{item.title}</strong><small>{item.source}</small></div><button className="remove-reference" onClick={() => onRemoveReference(item)} aria-label={`删除借鉴 ${item.title}`}><Trash2 /></button></div>)}</section>
+      <section className="asset-version-card"><strong>版本记录 · 最近 30 次</strong>{versions.length === 0 && <p>保存快照或采纳生成内容后，可在此恢复。</p>}{versions.map((version) => <div key={version.id}><GitCommit /><span>{version.label}<small>{version.createdAt}</small></span><Button variant="outline" size="sm" onClick={() => { onContentChange(version.content, true); onNotify("已恢复，恢复前内容已备份"); }}>恢复</Button></div>)}</section>
+    </aside></section>
   </div>;
-}
-
-function placeholderFor(type: string) {
-  const values: Record<string, string> = {
-    world: "补全这个世界的社会运行方式，并让力量的代价真正影响普通人的生活。",
-    characters: "借鉴已选人物的功能与弧光，重新设计一个立场会变化的关键配角。",
-    timeline: "检查过去事件、现在冲突与未来转折之间的时间因果。",
-    style: "保持既定意象和叙述距离，但让动作场面更有速度感。",
-    outline: "重做第一卷大纲，让每三章形成一次小高潮，并保留章尾钩子。",
-    chapters: "续写当前场景，强化动作、选择和人物之间的潜台词。",
-  };
-  return values[type] ?? values.world;
-}
-
-function safeFilename(value: string) {
-  return value.replace(/[\\/:*?"<>|]/g, "_").trim() || "未命名小说";
-}
-
-function downloadChapter(content: string, title: string) {
-  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `${safeFilename(title)}-第1章.md`;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }

@@ -1,7 +1,10 @@
 import type { BookProject } from "./bookshelf";
 import type { ReferenceItem } from "./reference-library-dialog";
+import { getRoadmap, worldlineContext, type StoryRoadmap } from "@/lib/story-roadmap";
 
 export type StoryMessage = { role: "ai" | "user"; text: string };
+export type PlotGenerationOptions = { messages: StoryMessage[]; context?: string };
+export type PlotProposal = { summary: string; nodes: Array<{ title: string; chapter: string; note: string }>; branches: PlotBranch[]; roadmap?: StoryRoadmap };
 
 export type PlotBranch = {
   id: string;
@@ -9,6 +12,9 @@ export type PlotBranch = {
   color: string;
   path: string;
   labels: Array<{ x: number; y: number; text: string }>;
+  from?: number;
+  to?: number;
+  status?: "planned" | "active" | "resolved";
 };
 
 export type PlotState = {
@@ -18,13 +24,24 @@ export type PlotState = {
   selectedNode: string;
   zoom: number;
   version: number;
+  nodes?: Array<{ title: string; chapter: string; note: string }>;
+  summary?: string;
+  discussion?: StoryMessage[];
+  discussionDraft?: string;
+  proposal?: PlotProposal;
+  roadmap?: StoryRoadmap;
 };
+
+export type Chapter = { id: string; title: string; content: string; updatedAt: string; plotEventIds?: string[] };
+export type AssetVersion = { id: string; label: string; createdAt: string; content: string };
+export type StorySnapshot = Pick<BookWorkspace, "idea" | "tags" | "references" | "assets" | "plot" | "chapters" | "activeChapterId">;
 
 export type BlueprintVersion = {
   id: string;
   label: string;
   createdAt: string;
   idea: string;
+  snapshot?: StorySnapshot;
 };
 
 export type BookWorkspace = {
@@ -35,6 +52,11 @@ export type BookWorkspace = {
   assets: Record<string, string>;
   plot: PlotState;
   versions: BlueprintVersion[];
+  chapters: Chapter[];
+  activeChapterId: string;
+  assetVersions: Record<string, AssetVersion[]>;
+  proposals: Record<string, string>;
+  reviews: Record<string, string>;
 };
 
 export function createBookWorkspace(book: BookProject): BookWorkspace {
@@ -45,10 +67,15 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
     tags: [book.genre],
     references: [],
     assets: {},
+    chapters: [{ id: "chapter-1", title: "第 1 章", content: "", updatedAt: "" }],
+    activeChapterId: "chapter-1",
+    assetVersions: {},
+    proposals: {},
+    reviews: {},
     plot: {
       instruction: `为《${book.title}》设计一条围绕核心冲突展开的支线，在中段与主线交汇，并在结局前回收。`,
-      branches: defaultPlotBranches(),
-      selected: "clue",
+      branches: [],
+      selected: "main",
       selectedNode: "",
       zoom: 1,
       version: 1,
@@ -64,28 +91,62 @@ export function mergeBookWorkspace(book: BookProject, saved?: Partial<BookWorksp
     ...base,
     ...saved,
     assets: { ...base.assets, ...saved.assets },
+    chapters: saved.chapters?.length ? saved.chapters : [{ ...base.chapters[0], content: saved.assets?.chapters ?? "" }],
+    activeChapterId: saved.chapters?.some((c) => c.id === saved.activeChapterId) ? saved.activeChapterId! : saved.chapters?.[0]?.id ?? "chapter-1",
+    assetVersions: saved.assetVersions ?? {},
+    proposals: saved.proposals ?? {},
+    reviews: saved.reviews ?? {},
     plot: { ...base.plot, ...saved.plot, branches: saved.plot?.branches ?? base.plot.branches },
     versions: saved.versions?.length ? saved.versions : base.versions,
   };
 }
 
-export function assetInitialContent(type: string, book: Pick<BookProject, "title" | "genre" | "premise">) {
-  const seed = `《${book.title}》｜${book.genre}\n核心设想：${book.premise}`;
-  const values: Record<string, string> = {
-    world: `${seed}\n\n世界内核：这里的规则、力量与代价尚待建立。\n\n请从三个问题开始：\n1. 这个世界最不寻常的常识是什么？\n2. 主角为实现目标必须付出什么代价？\n3. 哪条规则一旦被打破，会让主线彻底失控？`,
-    characters: `${seed}\n\n主角\n想要：\n害怕：\n秘密：\n会改变的信念：\n\n关键配角\n表层目标：\n隐藏目标：\n与主角的关系变化：`,
-    timeline: `${seed}\n\n故事开始前｜写下改变主角命运的旧事。\n第一卷开端｜触发事件迫使主角行动。\n中段转折｜主线与支线第一次互相改变。\n结局前夜｜所有未解决的代价集中显现。`,
-    style: `${seed}\n\n叙事视角：\n句式与节奏：\n核心意象：\n对话原则：\n每章钩子：\n避免使用：`,
-    outline: `${seed}\n\n第一卷目标：\n\n第 1 章｜触发事件\n冲突：\n推进：\n章尾钩子：\n\n第 2 章｜第一次选择\n冲突：\n推进：\n章尾钩子：`,
-    chapters: `# 《${book.title}》\n\n## 第 1 章\n\n${book.premise}\n\n（从这里开始写作，或在右侧告诉 AI 你希望这一章发生什么。）`,
-  };
-  return values[type] ?? values.world;
+
+export function storySnapshot(workspace: BookWorkspace): StorySnapshot {
+  const { idea, tags, references, assets, plot, chapters, activeChapterId } = workspace;
+  return structuredClone({ idea, tags, references, assets, plot, chapters, activeChapterId });
 }
 
-function defaultPlotBranches(): PlotBranch[] {
+export function withSnapshot(workspace: BookWorkspace, label: string): BookWorkspace {
+  const version = { id: crypto.randomUUID(), createdAt: new Date().toLocaleString("zh-CN"), label, idea: workspace.idea, snapshot: storySnapshot(workspace) };
+  return { ...workspace, versions: [version, ...workspace.versions].slice(0, 30) };
+}
+
+export function changeAsset(workspace: BookWorkspace, type: string, content: string, saveVersion = false): BookWorkspace {
+  const chapter = workspace.chapters.find((c) => c.id === workspace.activeChapterId) ?? workspace.chapters[0];
+  const key = type === "chapters" ? `chapter:${chapter.id}` : type;
+  const previous = type === "chapters" ? chapter.content : workspace.assets[type] ?? "";
+  const history = workspace.assetVersions[key] ?? [];
+  const versions = saveVersion ? [{ id: crypto.randomUUID(), createdAt: new Date().toLocaleString("zh-CN"), label: "修改前快照", content: previous }, ...history].slice(0, 30) : history;
+  return { ...workspace, assetVersions: { ...workspace.assetVersions, [key]: versions },
+    ...(type === "chapters" ? { chapters: workspace.chapters.map((c) => c.id === chapter.id ? { ...c, content, updatedAt: new Date().toISOString() } : c) }
+      : { assets: { ...workspace.assets, [type]: content } }),
+  };
+}
+
+export function buildStoryContext(book: BookProject, workspace: BookWorkspace, active: string): string {
+  const chapterIndex = Math.max(0, workspace.chapters.findIndex((c) => c.id === workspace.activeChapterId));
+  const chapter = workspace.chapters[chapterIndex];
+  const assets = Object.entries(workspace.assets).filter(([key]) => key !== "chapters").map(([key, value]) => `【${key === "timeline" ? "旧剧情笔记（冲突以已确认正文与当前世界线为准）" : key}】\n${value.slice(0, 14000)}`);
   return [
-    { id: "relationship", title: "人物关系支线", color: "#b96357", path: "M315 244 C350 75 650 65 780 244", labels: [{ x: 420, y: 87, text: "关系转折" }, { x: 625, y: 87, text: "共同选择" }] },
-    { id: "clue", title: "秘密线索支线", color: "#4f7185", path: "M95 244 C150 415 430 430 545 244", labels: [{ x: 225, y: 400, text: "发现线索" }, { x: 420, y: 400, text: "真相反转" }] },
-    { id: "world", title: "世界变化支线", color: "#8a7650", path: "M545 244 C625 500 930 495 1010 244", labels: [{ x: 690, y: 466, text: "规则失效" }, { x: 885, y: 466, text: "代价爆发" }] },
+    `书名：${book.title}\n类型：${book.genre}\n故事种子：${workspace.idea.slice(0, 12000)}\n创作偏好：${workspace.tags.join("、").slice(0, 2000)}\n当前工作区：${active}`,
+    `【当前编辑内容】\n${active === "chapters" ? `${chapter.title}\n${chapter.content.slice(-24000)}` : workspace.assets[active]?.slice(0, 24000) ?? workspace.idea.slice(0, 12000)}`,
+    worldlineContext(workspace, active),
+    ...assets, `【主支线说明】\n${workspace.plot.summary ?? "尚未生成"}`,
+    `【章节目录】\n${workspace.chapters.map((c) => c.title).join("\n").slice(0, 6000)}`,
+    ...workspace.chapters.slice(Math.max(0, chapterIndex - 3), chapterIndex).map((c) => `【前文：${c.title}，末尾片段】\n${c.content.slice(-5000)}`),
+  ].join("\n\n").slice(0, 120000);
+}
+
+export function preparation(workspace: BookWorkspace) {
+  const items = [
+    { label: "世界观", done: Boolean(workspace.assets.world?.trim()) },
+    { label: "人物", done: Boolean(workspace.assets.characters?.trim()) },
+    { label: "世界线", done: Boolean(workspace.assets.timeline?.trim()) || getRoadmap(workspace.plot).events.length >= 2 },
+    { label: "文风", done: Boolean(workspace.assets.style?.trim()) },
+    { label: "大纲", done: Boolean(workspace.assets.outline?.trim()) },
+    { label: "正文", done: workspace.chapters.some((chapter) => chapter.content.trim()) },
   ];
+  const completed = items.filter((item) => item.done).length;
+  return { items, completed, percent: Math.round(completed / items.length * 100) };
 }

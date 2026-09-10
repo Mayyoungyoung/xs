@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import re
 import uuid
 from pathlib import Path
@@ -19,7 +21,7 @@ def slugify(value: str) -> str:
 
 
 def ensure_workspace() -> Path:
-    ROOT.mkdir(exist_ok=True)
+    ROOT.mkdir(parents=True, exist_ok=True)
     (ROOT / "books").mkdir(exist_ok=True)
     return ROOT
 
@@ -32,13 +34,23 @@ def read_json(path: Path, default: Any) -> Any:
 
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False, suffix=".tmp") as handle:
+            temporary = Path(handle.name)
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and temporary.exists():
+            temporary.unlink()
 
 
 class BookStore:
     def __init__(self, root: Path = ROOT):
-        self.root = root
-        ensure_workspace()
+        self.root = Path(root).resolve()
+        (self.root / "books").mkdir(parents=True, exist_ok=True)
 
     @property
     def index_path(self) -> Path:
@@ -52,7 +64,10 @@ class BookStore:
         write_json(self.index_path, [book.to_dict() for book in books])
 
     def create_book(self, title: str, genre: str = "", premise: str = "") -> Book:
-        book_id = f"{slugify(title)}-{uuid.uuid4().hex[:8]}"
+        title = title.strip()
+        if not title:
+            raise ValueError("书名不能为空")
+        book_id = f"{slugify(title)[:80]}-{uuid.uuid4().hex[:8]}"
         book = Book(id=book_id, title=title, genre=genre, premise=premise)
         books = self.list_books()
         books.append(book)
@@ -70,7 +85,13 @@ class BookStore:
         raise KeyError(f"Book not found: {book_id}")
 
     def book_dir(self, book_id: str) -> Path:
-        return self.root / "books" / book_id
+        if not book_id or Path(book_id).name != book_id or book_id in {".", ".."} or any(char in book_id for char in "/\\:"):
+            raise ValueError("无效的书籍编号")
+        base = (self.root / "books").resolve()
+        target = (base / book_id).resolve()
+        if target.parent != base:
+            raise ValueError("书籍路径超出工作区")
+        return target
 
     def artifact_dir(self, book_id: str, kind: str) -> Path:
         if kind == "chapter_draft":
@@ -90,6 +111,9 @@ class BookStore:
         status: str = "pending_review",
         metadata: dict[str, Any] | None = None,
     ) -> Artifact:
+        self.get_book(book_id)
+        if not re.fullmatch(r"[a-z_]+", kind):
+            raise ValueError("无效的产物类型")
         artifact = Artifact(
             id=f"{kind}-{uuid.uuid4().hex[:8]}",
             book_id=book_id,
@@ -130,7 +154,8 @@ class BookStore:
 
     def latest_artifact(self, book_id: str, kind: str) -> Artifact | None:
         artifacts = self.list_artifacts(book_id, kind)
-        return artifacts[-1] if artifacts else None
+        usable = [item for item in artifacts if item.status == "approved"]
+        return usable[-1] if usable else None
 
     def append_agent_log(self, book_id: str, role: str, content: str, metadata: dict[str, Any] | None = None) -> None:
         entry = {

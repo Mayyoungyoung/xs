@@ -1,100 +1,136 @@
 # 墨脉 · AI 小说工作台
 
-一个同时包含 Web 创作工作台和 Python CLI 的大模型小说创作系统。它把世界观、人物、世界线、主线、支线、文风与章节正文作为可编辑资产，并允许作者随时和模型讨论后重绘或重写。
+面向长篇中文小说的本地创作应用，包含 Windows 桌面软件、Web 工作台与 Python CLI。世界观、人物、世界线、大纲、文风、章节、借鉴与对话按书籍隔离保存。
 
-## Web 工作台
+## Windows 桌面软件
+
+发给别人安装时，只需发送 `desktop-release/Momai-Setup-1.1.0-x64.exe`。这是包含完整运行组件的 Windows 10/11 x64 安装包，接收者双击后可在「选择安装位置」页选择 D 盘等文件夹，安装后通过桌面或开始菜单中的「墨脉小说创作」启动，无需安装 Node.js 或启动网页服务。程序支持在 Windows 设置中卸载。
+
+安装包只包含程序，不包含本机小说或 API 密钥。每位使用者在软件设置中填写自己的 DeepSeek 密钥。当前安装包没有代码签名，Windows 下载保护可能显示未知发布者；应从可信来源取得安装文件并核对发布者提供的 SHA-256。
+
+也可直接运行 `desktop-release/Momai-win32-x64/Momai.exe`，但此方式必须保留同目录全部文件，不能只把这个 exe 发给别人。
+
+- 小说首次默认保存至 `%APPDATA%\MomaiNovel\data\library.json`。在「模型设置 → 小说存储位置 → 更改位置并迁移」选择新的空文件夹（例如 `D:\小说资料`），校验成功后立即切换到新位置，无需重启。
+- 全部小说、章节、世界线、讨论、版本、自动备份、模型选择和本机加密密钥一起迁移。迁移期间的保存请求会排队并写入新位置；新位置已有内容时拒绝覆盖，失败时仍使用原目录。旧目录暂时保留，核对后可自行清理。
+- 启动定位配置 `%APPDATA%\MomaiNovel\storage-location.json` 和界面缓存仍在系统用户目录，小说资料不必放在 C 盘。如果自定义磁盘离线或书架文件丢失，软件会明确提示，不会创建空书架覆盖。
+- 自动备份在同目录的 `backups`，保留最近 20 份；每次启动后的首次更新会备份，持续编辑时两次备份至少间隔 5 分钟。可从软件中的「导入项目」恢复备份。
+- DeepSeek 密钥在设置中填写，使用 Windows 本机加密后独立保存，重启仍可使用，不进入小说导出文件。
+- 网页版与桌面版的数据独立。迁移已有小说：网页版书架「导出备份」→ 桌面版书架「导入项目」。完整备份含正文、世界线、讨论和版本；原网页版数据保留。
+- 本地编辑无需联网，AI 创作与资料检索需要网络和相应模型密钥。
+
+重新制作安装包（开发者需要 Node.js 与 [Inno Setup 6/7 编译器](https://jrsoftware.org/isdl.php)）：
 
 ```powershell
 cd webapp
-Copy-Item .env.example .env.local
-# 编辑 .env.local，只在本机填入 DEEPSEEK_API_KEY
 npm ci
+npm run desktop:installer
+```
+
+默认识别 Inno Setup 常见安装位置；也可设置 `ISCC_PATH` 为 `ISCC.exe` 完整路径。首次打包需要下载 Electron 运行组件。也可将对应版本的 Windows x64 官方 zip 放在 `webapp/desktop-runtime/`，打包时会验证官方 SHA-256 后使用。安装包以当前 Windows 用户安装，所选文件夹需要可写；更新和卸载不会删除独立的数据目录。当前没有自动更新。
+
+## 网页版开始使用
+
+需要 Node.js 22.15+。Windows 可在项目目录运行：
+
+```powershell
+.\start.ps1
+```
+
+也可以手动启动：
+
+```powershell
+cd webapp
+npm ci
+Copy-Item .env.example .env.local  # 仅首次运行；不要覆盖已有密钥配置
 npm run dev
 ```
 
-浏览器打开 `http://localhost:5173`。Web 端目前提供：
+打开 **http://localhost:5173**。保持使用同一浏览器和同一地址：`localhost` 与 `127.0.0.1`、不同端口的本地数据互不共享。
 
-- 以书架作为首页，创建、搜索、排序、导入和备份多本小说；点击书籍后进入独立编辑工作台。
-- 每本小说独立保存故事种子、对话、借鉴、情节图、编辑器内容与故事蓝图快照，互不串用。
+无需密钥即可创建小说、编辑设定与章节、保存、恢复和备份。启用 AI：
 
-- `deepseek-v4-flash`（默认）与 `deepseek-v4-pro` 模型选择。
-- 从一句话扩展故事种子，并在右侧与模型持续共创。
-- 普通网页、图书数据库与百科的组合检索，可查作品、题材、人物、作家与作品文风，并回看原始来源。
-- TXT、Markdown、JSON 本地借鉴资料加载。
-- 在“章节正文”中可选择本地文件夹保存 Markdown；不支持文件夹写入的浏览器会自动改为下载文件。
-- 主线横向贯穿、支线从节点生长/交汇/回收的情节编排图。
-- 通过自然语言要求模型添加支线并更新情节图。
+1. 在书架或小说工作区点击「模型设置」。
+2. 粘贴 DeepSeek API Key，点击「保存密钥」；立即生效，无需重启。
+3. 点击「测试连接」，通过后即可生成。测试只发送简短测试消息，不发送小说内容。
 
-借鉴功能只提取高层结构、人物功能和可描述的文风参数，不抓取或复刻小说正文。
+界面填写的密钥保存在当前标签页的 sessionStorage 中，刷新后可继续使用；不会写入书籍数据库或导出备份，可随时点击「清除密钥」。如需服务端统一配置，仍可在 `webapp/.env.local` 设置 `DEEPSEEK_API_KEY` 后重启。当前标签页密钥优先于服务端配置。
 
-### 密钥安全
+支持 `deepseek-v4-flash` 与 `deepseek-v4-pro`。模型选择保存在当前设备；服务端默认模型可用 `DEEPSEEK_MODEL` 设置。模型请求明确关闭默认思考模式，使正文输出预算用于创作内容。[DeepSeek 官方接口说明](https://api-docs.deepseek.com/api/create-chat-completion/)。
 
-- 密钥只从 `DEEPSEEK_API_KEY` 环境变量或未跟踪的 `webapp/.env.local` 读取。
-- `.env`、`.env.*`、`*.key` 和 `*.pem` 已加入忽略规则。
-- 仓库中只提供不含真实密钥的 `.env.example`。
+## 完整创作流程
 
-## CLI 初版
+1. **书架**：创建、搜索、按最近编辑/书名/准备度排序、删除和导入导出。章节数与字数来自实际稿件；示例书仅提供故事种子，准备度为 0%。准备度按世界观、人物、世界线、文风、大纲与正文 6 项实际内容统计，不表示全书完成度。
+2. **故事蓝图**：编辑故事种子和偏好，完善构思；完善结果先预览后采纳；支持保存与恢复整个故事的快照。顶部有明确的「返回书架」按钮；设置中可修改书名。
+3. **独立模块**：故事蓝图只编辑构想与偏好；世界观、人物、文风、大纲、正文与借鉴库分别独立，通用助手按需展开。AI 读取当前书籍设定、编辑内容、主支线、前文和最近对话。
+4. **世界线**：一条或多条主线与衍生支线按行展示，从左向右推进，共享事件连接多线交汇。每条线可编辑目标，每个事件可安排章节、选择与后果、写作进度。AI 支持讨论、生成多线方案、预览修改后采纳；旧版剧情自动映射为路线图，原时间说明收在可折叠的剧情笔记中，所有原数据保留。
+5. **章节正文**：新建、切换、重命名、删除章节。支持续写、润色和连续性检查。生成先预览，可编辑预览，再替换或追加；离开页面后预览和审查仍保留。本章可绑定一个或多个世界线事件，生成以这些事件为目标，未来事件仅作为计划；作者确认本章完成后同步路线图进度。
+6. **版本恢复**：采纳或恢复前保留原稿；可手动保存快照。每个编辑器保留最近 30 次快照，完整故事也保留最近 30 次。旧备份中的种子快照仍可恢复。
+7. **共创助手**：连续对话、中文输入法发送保护、停止生成、错误提示、采纳到当前编辑器。清空对话不会删除设定和章节。
+8. **借鉴资料**：组合检索网页、百科与图书元数据；部分来源不可用时保留其他结果。支持 TXT/Markdown/JSON，本地材料每份最多 2 MB、6 万字符，超限会提示拆分。
+9. **导出**：单个设定或章节导出 Markdown；全部章节合并导出；书架 JSON 完整备份含正文、版本、借鉴、对话、生成预览与审查。
 
-当前已实现一个无外部依赖的 Python CLI 原型：
+空白编辑器和默认 AI 要求按模块分别生成，并结合当前书名、题材、构想、已有故事线与本章事件调整；提示不会自动写入正文。路线图支持缩放、恢复 100%、适应宽度、展开大图与横纵滚动，缩放比例按书保存；展开后按 Esc 返回。
+
+## 保存与恢复
+
+- 浏览器 IndexedDB 保存完整书架，避免原先 localStorage 的小容量限制。旧版 localStorage 自动迁移，迁移源不会被删除。
+- 书籍索引与工作区原子保存；状态只有在写入完成后才显示成功。
+- 同时打开多页编辑时检测版本冲突，阻止旧页面覆盖新数据。冲突时先导出本页备份，再刷新。
+- 读取损坏数据时不覆盖原始存储；写入失败时保留页面内容并明确提示备份。
+- 导入前验证结构、书籍编号、章节编号与来源链接。同编号覆盖需要确认。删除书籍不可撤销，建议先导出备份；删除章节前自动保存完整快照。
+- 本地数据库不是云同步。换设备、浏览器或地址时，请通过 JSON 备份迁移。清除网站数据会删除此地址的本地稿件。
+
+## AI 的实际范围
+
+- 当前 Web 端接入 DeepSeek，未配置密钥时不会用占位文本冒充生成。密钥、余额、限流、超时和返回格式错误有独立提示。
+- 为控制请求大小，模型上下文最多 12 万字符；当前正文取末尾 2.4 万字符，各设定最多 1.4 万字符，最近 3 章各取末尾 5000 字符；对话取最近 12 条，借鉴取最近 12 项、每项最多 1.2 万字符。长篇前文并非全部送入模型，请把关键事实维护在设定中。
+- 单次输出最多 12000 tokens；若达到上限，会提示结果可能不完整。原稿保留，作者决定是否采纳。
+- 联网借鉴来自公开摘要，不保证所有地区都能连接。CLI 的题材调研是模型建议，不能当作实时检索结果。
+- 连续性检查是创作建议，仍需作者审阅。目前没有云端协作、向量记忆或自动发布。
+
+## Python CLI
+
+Python 3.10+，不需要外部依赖。
 
 ```powershell
-python -m novel_agent --help
 python -m novel_agent init
-python -m novel_agent create-book "灵脉残卷" --genre "玄幻升级流" --premise "废柴少年发现母亲失踪与宗门禁地有关"
+python -m novel_agent create-book "雾城" --genre "悬疑" --premise "所有人忘记同一天"
 python -m novel_agent list-books
-python -m novel_agent demo <book_id>
+python -m novel_agent --mock demo <book_id>
 ```
 
-没有配置 API Key 时，系统会自动使用 mock 模式，用来验证多书籍沙盒、Agent 流程和闸口机制。
-
-### 使用 DeepSeek
-
-在 PowerShell 中设置环境变量后运行即可：
+真实调用需在运行 CLI 的终端设置 `DEEPSEEK_API_KEY`；CLI 不自动读取 Web 的 `.env.local`。无密钥会明确提示演示模式，也可使用 `--mock`。CLI 与 Web 的稿件存储彼此独立。
 
 ```powershell
-$env:DEEPSEEK_API_KEY="你的 DeepSeek API Key"
 python -m novel_agent world <book_id>
+python -m novel_agent characters <book_id>
+python -m novel_agent outline <book_id>
+python -m novel_agent draft <book_id> 1
+python -m novel_agent revise <book_id> <artifact_id> --note "强化人物动机"
+python -m novel_agent export <book_id> --output "exports/雾城.md"
 ```
 
-当前默认调用：
+每个产物可 `approve` 确认、`reject` 记录修改要求、`skip` 保留待确认。只有已确认的设定和章节快照进入后续上下文。章节生成前须确认世界观、人物与大纲。`demo` 按确认结果逐步推进；驳回或跳过即暂停。`revise` 生成独立修订稿并保留原稿；`export` 合并每章最新已确认稿件，避免覆盖现有文件。产物写入 `workspace/books/<book_id>`，JSON 使用原子替换。
 
-- base URL: `https://api.deepseek.com/chat/completions`
-- model: `deepseek-v4-flash`
-
-也可以使用 `--model deepseek-v4-pro` 临时切换：
+## 验证与正式构建
 
 ```powershell
-python -m novel_agent --model deepseek-v4-flash world <book_id>
+cd webapp
+npm test
+npm run lint
+npm run typecheck
+npm run build
+npm start
 ```
 
-### 当前命令
+在项目根目录验证 CLI：
 
-```text
-init             创建本地 workspace 目录
-create-book      创建一本新书
-list-books       列出所有书籍
-artifacts        列出一本书的产物
-research         生成风向报告
-style            根据样本文本生成 Style Prompt
-reference        加入本地剧情、人物、文风或世界观借鉴资料
-world            生成世界观白皮书
-characters       生成深度人物卡
-outline          生成分卷与章节大纲
-draft            生成章节初稿、审查、润色与快照
-demo             按顺序跑一遍最小闭环
+```powershell
+python -m unittest discover -s tests -v
 ```
 
-每个核心产物都会进入闸口：
+Web 测试包含数据迁移、隔离、快照、数据库冲突、模型请求及错误处理、检索容错，以及模拟 DOM 中的编辑→生成预览→采纳→恢复→切章→聊天→重新载入流程。模型测试使用可控响应，不消耗真实账户额度。新增回归覆盖空书 0%、按钮前景色、返回书架、界面密钥设置、备份不含密钥以及手动编排主支线。真实模型质量和账户连通性需要配置密钥后测试。
 
-- `approve`：确认产物。
-- `reject`：记录修改意见。
-- `skip`：保留待确认。
+密钥可保存在当前标签页会话、服务端环境或未跟踪的本地配置中，独立于小说数据。请勿提交 `.env*`、`.dev.vars*`、密钥文件或包含私人稿件的运行数据。现有 Sites 构建集成保留；本地优化不会自动发布到现有站点。
 
-产物会写入 `workspace/books/<book_id>`，每本书独立存储。
-
-## 文档
-
-产品与技术规格见：
-
-- [docs/novel-agent-system-spec.md](docs/novel-agent-system-spec.md)
-- [docs/implementation-roadmap.md](docs/implementation-roadmap.md)
+设计规格与未来计划见 `docs/novel-agent-system-spec.md`、`docs/implementation-roadmap.md`。
