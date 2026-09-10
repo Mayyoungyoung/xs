@@ -45,10 +45,18 @@ export function ReferenceLibraryDialog({ open, onOpenChange, scope, selected, on
     if (!query.trim()) return;
     setLoading(true); setError("");
     try {
-      const response = await fetch("/api/references/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, kind }) });
-      const data = await response.json() as { results?: Omit<ReferenceItem, "scope">[]; error?: string };
-      if (!response.ok) throw new Error(data.error ?? "检索失败");
-      setResults((data.results ?? []).map((item) => ({ ...item, scope })));
+      const wikiUrl = `https://zh.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=8&prop=extracts|info&exintro=1&explaintext=1&inprop=url&format=json&origin=*`;
+      const directResponse = await fetch(wikiUrl, { signal: AbortSignal.timeout(9000) });
+      const directData = await directResponse.json() as { query?: { pages?: Record<string, { pageid: number; title: string; extract?: string; fullurl?: string }> } };
+      const directResults: ReferenceItem[] = Object.values(directData.query?.pages ?? {}).map((page) => ({ id: `wiki-${page.pageid}`, title: page.title, summary: page.extract ?? "暂无公开摘要。", source: "维基百科", url: page.fullurl, kind, scope }));
+      if (directResults.length) {
+        setResults(directResults);
+      } else {
+        const response = await fetch("/api/references/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, kind }) });
+        const data = await response.json() as { results?: Omit<ReferenceItem, "scope">[]; error?: string };
+        if (!response.ok) throw new Error(data.error ?? "检索失败");
+        setResults((data.results ?? []).map((item) => ({ ...item, scope })));
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "暂时无法检索");
     } finally { setLoading(false); }
