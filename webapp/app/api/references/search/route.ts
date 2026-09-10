@@ -15,9 +15,11 @@ export async function POST(request: Request) {
 
   const wikiUrl = `https://zh.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=5&prop=extracts|info&exintro=1&explaintext=1&inprop=url&format=json&origin=*`;
   const booksUrl = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=5&printType=books&langRestrict=zh`;
-  const [wikiResponse, booksResponse] = await Promise.allSettled([
-    fetch(wikiUrl, { headers: { "User-Agent": "MomaiNovelStudio/1.0" } }),
-    fetch(booksUrl),
+  const openLibraryUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(query)}&limit=5&fields=key,title,author_name,first_publish_year,subject`;
+  const [wikiResponse, booksResponse, openLibraryResponse] = await Promise.allSettled([
+    fetch(wikiUrl, { headers: { "User-Agent": "MomaiNovelStudio/1.0" }, signal: AbortSignal.timeout(12000) }),
+    fetch(booksUrl, { signal: AbortSignal.timeout(12000) }),
+    fetch(openLibraryUrl, { headers: { "User-Agent": "MomaiNovelStudio/1.0" }, signal: AbortSignal.timeout(12000) }),
   ]);
   const results: SearchResult[] = [];
 
@@ -33,6 +35,13 @@ export async function POST(request: Request) {
       const info = item.volumeInfo ?? {};
       const detail = [info.authors?.join(" / "), info.categories?.join(" / "), info.description].filter(Boolean).join("。 ");
       results.push({ id: `books-${item.id}`, title: info.title ?? query, summary: stripMarkup(detail || "暂无公开摘要。"), source: "Google Books", url: info.infoLink ?? "", kind });
+    }
+  }
+  if (openLibraryResponse.status === "fulfilled" && openLibraryResponse.value.ok) {
+    const data = await openLibraryResponse.value.json() as { docs?: Array<{ key?: string; title?: string; author_name?: string[]; first_publish_year?: number; subject?: string[] }> };
+    for (const item of data.docs ?? []) {
+      const detail = [item.author_name?.join(" / "), item.first_publish_year ? `首版 ${item.first_publish_year}` : "", item.subject?.slice(0, 6).join(" / ")].filter(Boolean).join("。 ");
+      results.push({ id: `openlibrary-${item.key ?? item.title}`, title: item.title ?? query, summary: detail || "暂无公开摘要。", source: "Open Library", url: item.key ? `https://openlibrary.org${item.key}` : "", kind });
     }
   }
 
