@@ -24,7 +24,8 @@ type Props = {
   books: BookProject[];
   onOpenBook: (book: BookProject) => void;
   onCreateBook: (book: BookProject) => void;
-  onImportBooks: (books: BookProject[]) => void;
+  onImportBooks: (books: BookProject[], workspaces?: Record<string, unknown>) => void;
+  onExportBooks: () => void;
 };
 
 export const initialBooks: BookProject[] = [
@@ -33,7 +34,7 @@ export const initialBooks: BookProject[] = [
   { id: "star-harbor", title: "第七码头", genre: "科幻冒险", premise: "每艘归港的飞船，都比离开时少一个人。", chapters: 6, words: 21500, progress: 18, updatedAt: "4 天前", accent: "#51476a", glyph: "七" },
 ];
 
-export function Bookshelf({ books, onOpenBook, onCreateBook, onImportBooks }: Props) {
+export function Bookshelf({ books, onOpenBook, onCreateBook, onImportBooks, onExportBooks }: Props) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("updated");
   const [createOpen, setCreateOpen] = useState(false);
@@ -57,21 +58,16 @@ export function Bookshelf({ books, onOpenBook, onCreateBook, onImportBooks }: Pr
   async function importProjects(files: FileList | null) {
     if (!files?.[0]) return;
     try {
-      const parsed = JSON.parse(await files[0].text()) as BookProject | BookProject[];
-      const items = (Array.isArray(parsed) ? parsed : [parsed]).filter((item) => item?.id && item?.title);
-      onImportBooks(items);
+      const parsed = JSON.parse(await files[0].text()) as BookProject | BookProject[] | { books?: BookProject[]; workspaces?: Record<string, unknown> };
+      const items = (Array.isArray(parsed) ? parsed : "books" in parsed && Array.isArray(parsed.books) ? parsed.books : [parsed]).filter((item) => item?.id && item?.title);
+      const importedWorkspaces = !Array.isArray(parsed) && "workspaces" in parsed ? parsed.workspaces : undefined;
+      onImportBooks(items, importedWorkspaces);
     } catch { window.alert("项目文件无法识别，请选择从墨脉导出的 JSON 文件。"); }
-  }
-
-  function exportShelf() {
-    const blob = new Blob([JSON.stringify(books, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob); const anchor = document.createElement("a");
-    anchor.href = url; anchor.download = "墨脉书架.json"; anchor.click(); URL.revokeObjectURL(url);
   }
 
   return <main className="shelf-shell">
     <header className="shelf-topbar"><div className="brand-mark"><span>墨</span></div><div className="brand-name">墨脉 <em>AI 小说工作台</em></div>
-      <nav><button className="active" onClick={() => { setQuery(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}>我的书架</button><button onClick={() => inputRef.current?.click()}>导入项目</button><button onClick={exportShelf}>导出备份</button></nav>
+      <nav><button className="active" onClick={() => { setQuery(""); window.scrollTo({ top: 0, behavior: "smooth" }); }}>我的书架</button><button onClick={() => inputRef.current?.click()}>导入项目</button><button onClick={onExportBooks}>导出备份</button></nav>
       <div className="shelf-user"><span>所有更改保存在此设备</span><button className="avatar" onClick={() => setShelfInfoOpen(true)}>砚</button></div>
     </header>
     <div className="shelf-content">

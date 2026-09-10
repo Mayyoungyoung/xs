@@ -14,49 +14,37 @@ import { Textarea } from "@/components/ui/textarea";
 import { PlotWorkbench } from "@/components/novel/plot-workbench";
 import { AssetWorkbench } from "@/components/novel/asset-workbench";
 import { Bookshelf, initialBooks, type BookProject } from "@/components/novel/bookshelf";
+import { createBookWorkspace, mergeBookWorkspace, type BookWorkspace, type StoryMessage } from "@/components/novel/book-workspace";
 import { ReferenceLibraryDialog, type ReferenceItem, type ReferenceScope } from "@/components/novel/reference-library-dialog";
 
 const navGroups = [
   { label: "故事设计", items: [
     { id: "overview", label: "故事蓝图", icon: LayoutDashboard, badge: "" },
-    { id: "world", label: "世界观", icon: Box, badge: "1" },
-    { id: "characters", label: "人物角色", icon: CircleUserRound, badge: "6" },
+    { id: "world", label: "世界观", icon: Box, badge: "" },
+    { id: "characters", label: "人物角色", icon: CircleUserRound, badge: "" },
     { id: "timeline", label: "世界线", icon: Network, badge: "" },
-    { id: "plot", label: "主线与支线", icon: GitBranch, badge: "4" },
+    { id: "plot", label: "主线与支线", icon: GitBranch, badge: "" },
     { id: "style", label: "文笔文风", icon: Feather, badge: "" },
     { id: "references", label: "借鉴库", icon: BookMarked, badge: "" },
   ]},
   { label: "开始写作", items: [
-    { id: "outline", label: "卷章大纲", icon: Library, badge: "36" },
-    { id: "chapters", label: "章节正文", icon: BookOpen, badge: "12" },
+    { id: "outline", label: "卷章大纲", icon: Library, badge: "" },
+    { id: "chapters", label: "章节正文", icon: BookOpen, badge: "" },
   ]},
-];
-
-const chapterSteps = [
-  { no: "01", title: "雨夜归乡", note: "异象出现 · 主角受命返乡", status: "已完成" },
-  { no: "02", title: "井下有声", note: "发现旧井与失踪案相关", status: "已完成" },
-  { no: "03", title: "无名来客", note: "沈青霜首次登场", status: "进行中" },
-  { no: "04", title: "禁山灯火", note: "支线与主线第一次交汇", status: "待设计" },
-];
-
-const firstMessages = [
-  { role: "ai", text: "我已经读过当前蓝图。世界规则很有辨识度，但主角为什么非要回到雾隐镇，还缺一个更私人的理由。" },
-  { role: "ai", text: "可以把母亲留下的残卷改成一封会随月相改变内容的信。这样既连到主线，也能持续制造章节钩子。要我把这个变化同步到世界观、人物动机和前三章吗？" },
 ];
 
 export default function Home() {
   const [screen, setScreen] = useState<"shelf" | "studio">("shelf");
   const [books, setBooks] = useState<BookProject[]>(initialBooks);
-  const [currentBook, setCurrentBook] = useState<BookProject>(initialBooks[0]);
+  const [currentBookId, setCurrentBookId] = useState(initialBooks[0].id);
+  const [workspaces, setWorkspaces] = useState<Record<string, BookWorkspace>>({});
+  const [hydrated, setHydrated] = useState(false);
   const [active, setActive] = useState("overview");
-  const [idea, setIdea] = useState("一个能听见旧物记忆的落魄修复师，回到被大雾封锁的故乡，发现所有人都在忘记同一天。");
-  const [messages, setMessages] = useState(firstMessages);
   const [chat, setChat] = useState("");
   const [generating, setGenerating] = useState(false);
   const [toast, setToast] = useState("");
   const [rightOpen, setRightOpen] = useState(true);
   const [model, setModel] = useState("deepseek-v4-flash");
-  const [references, setReferences] = useState<ReferenceItem[]>([]);
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [referenceScope, setReferenceScope] = useState<ReferenceScope>("plot");
   const [aiError, setAiError] = useState("");
@@ -64,9 +52,35 @@ export default function Home() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [workspaceSearch, setWorkspaceSearch] = useState("");
-  const [tags, setTags] = useState(["玄幻悬疑", "克制感情线"]);
+  const currentBook = useMemo(() => books.find((book) => book.id === currentBookId) ?? books[0] ?? initialBooks[0], [books, currentBookId]);
+  const workspace = mergeBookWorkspace(currentBook, workspaces[currentBook.id]);
+  const { idea, messages, references, tags } = workspace;
+  const chapterSteps = useMemo(() => [
+    { no: "01", title: "触发事件", note: `让《${currentBook.title}》的主角无法回避核心冲突`, status: "待设计" },
+    { no: "02", title: "第一次选择", note: "主角付出代价，主线开始推进", status: "待设计" },
+    { no: "03", title: "支线生长", note: "人物关系或秘密线索改变主线", status: "待设计" },
+    { no: "04", title: "阶段交汇", note: "一条支线与主线形成新的难题", status: "待设计" },
+  ], [currentBook.title]);
+  const worldSummary = firstLine(workspace.assets.world) || "尚未建立世界规则。先定义力量、秩序与代价，再让 AI 帮你补全。";
+  const characterSummary = firstLine(workspace.assets.characters) || "尚未建立主角人物卡。请从欲望、恐惧和秘密开始。";
+  const styleSummary = firstLine(workspace.assets.style) || "尚未设定文风指纹。可借鉴作家、作品或自定义语气。";
+  const configuredAssets = Object.keys(workspace.assets).length;
+  const readiness = Math.min(100, 20 + configuredAssets * 12 + references.length * 4 + (workspace.plot.branches.length - 3) * 6);
   const currentLabel = useMemo(() => navGroups.flatMap((group) => group.items).find((item) => item.id === active)?.label, [active]);
   const searchItems = useMemo(() => navGroups.flatMap((group) => group.items).filter((item) => item.label.includes(workspaceSearch.trim())), [workspaceSearch]);
+
+  function updateWorkspace(patch: Partial<BookWorkspace>) {
+    setWorkspaces((items) => ({ ...items, [currentBook.id]: { ...mergeBookWorkspace(currentBook, items[currentBook.id]), ...patch } }));
+  }
+
+  function setBookIdea(nextIdea: string) {
+    updateWorkspace({ idea: nextIdea });
+    setBooks((items) => items.map((book) => book.id === currentBook.id ? { ...book, premise: nextIdea, updatedAt: "刚刚" } : book));
+  }
+
+  function updateMessages(next: StoryMessage[] | ((items: StoryMessage[]) => StoryMessage[])) {
+    updateWorkspace({ messages: typeof next === "function" ? next(messages) : next });
+  }
 
   useEffect(() => {
     const modelContext = (document as Document & {
@@ -92,41 +106,62 @@ export default function Home() {
         if (typeof nextIdea !== "string" || nextIdea.trim().length < 2) {
           throw new Error("故事构想至少需要两个字");
         }
-        setIdea(nextIdea.trim());
+        setBookIdea(nextIdea.trim());
         setScreen("studio");
         return { status: "updated", idea: nextIdea.trim() };
       },
     }, { signal: lifecycle.signal })).catch(() => undefined);
     return () => lifecycle.abort();
-  }, []);
+  }, [currentBook]);
 
   useEffect(() => {
     try {
-      const saved = window.localStorage.getItem("momai-references");
-      if (saved) setReferences(JSON.parse(saved) as ReferenceItem[]);
       const savedBooks = window.localStorage.getItem("momai-books");
-      if (savedBooks) setBooks(JSON.parse(savedBooks) as BookProject[]);
+      const nextBooks = savedBooks ? JSON.parse(savedBooks) as BookProject[] : initialBooks;
+      if (savedBooks) setBooks(nextBooks);
+      const savedWorkspaces = window.localStorage.getItem("momai-book-workspaces");
+      if (savedWorkspaces) setWorkspaces(JSON.parse(savedWorkspaces) as Record<string, BookWorkspace>);
+      else {
+        const legacyReferences = window.localStorage.getItem("momai-references");
+        if (legacyReferences && nextBooks[0]) setWorkspaces({ [nextBooks[0].id]: { ...createBookWorkspace(nextBooks[0]), references: JSON.parse(legacyReferences) as ReferenceItem[] } });
+      }
     } catch { /* local reference cache is optional */ }
+    finally { setHydrated(true); }
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem("momai-references", JSON.stringify(references));
-  }, [references]);
+    if (!hydrated) return;
+    setWorkspaces((items) => {
+      const next = { ...items };
+      books.forEach((book) => { if (!next[book.id]) next[book.id] = createBookWorkspace(book); });
+      return next;
+    });
+  }, [books, hydrated]);
 
   useEffect(() => {
+    if (!hydrated) return;
     window.localStorage.setItem("momai-books", JSON.stringify(books));
-  }, [books]);
+  }, [books, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    window.localStorage.setItem("momai-book-workspaces", JSON.stringify(workspaces));
+  }, [workspaces, hydrated]);
 
   function openBook(book: BookProject) {
-    setCurrentBook(book);
-    setIdea(book.premise);
+    setCurrentBookId(book.id);
+    setWorkspaces((items) => items[book.id] ? items : { ...items, [book.id]: createBookWorkspace(book) });
+    setChat("");
     setActive("overview");
     setScreen("studio");
   }
 
   function createBook(book: BookProject) {
     setBooks((items) => [book, ...items]);
-    openBook(book);
+    setWorkspaces((items) => ({ ...items, [book.id]: createBookWorkspace(book) }));
+    setCurrentBookId(book.id);
+    setActive("overview");
+    setScreen("studio");
   }
 
   function openReferences(scope: ReferenceScope) {
@@ -135,8 +170,13 @@ export default function Home() {
   }
 
   function addReference(reference: ReferenceItem) {
-    setReferences((items) => items.some((item) => item.id === reference.id && item.scope === reference.scope) ? items : [...items, reference]);
+    updateWorkspace({ references: references.some((item) => item.id === reference.id && item.scope === reference.scope) ? references : [...references, reference] });
     notify(`已加入借鉴：${reference.title}`);
+  }
+
+  function removeReference(reference: ReferenceItem) {
+    updateWorkspace({ references: references.filter((item) => item.id !== reference.id || item.scope !== reference.scope) });
+    notify(`已删除借鉴：${reference.title}`);
   }
 
   async function askAI(prompt: string, task = "chat") {
@@ -171,8 +211,8 @@ export default function Home() {
     setGenerating(true);
     try {
       const content = await askAI(idea, "story_seed");
-      setIdea(content);
-      setMessages((value) => [...value, { role: "ai", text: "故事种子已经按当前设定和借鉴资料重新完善。你可以继续指出要保留或删掉的部分。" }]);
+      setBookIdea(content);
+      updateMessages((value) => [...value, { role: "ai", text: "故事种子已经按当前设定和借鉴资料重新完善。你可以继续指出要保留或删掉的部分。" }]);
       notify("故事种子已完善，并标记了 3 处可同步更新");
     } catch { /* error is shown beside the composer */ } finally { setGenerating(false); }
   }
@@ -180,13 +220,13 @@ export default function Home() {
   async function sendMessage() {
     const value = chat.trim();
     if (!value) return;
-    setMessages((items) => [...items, { role: "user", text: value }]);
+    updateMessages((items) => [...items, { role: "user", text: value }]);
     setChat("");
     setGenerating(true);
     try {
       const task = active === "plot" ? "plot_update" : active === "characters" ? "character_design" : active === "style" ? "style_fingerprint" : "chat";
       const content = await askAI(value, task);
-      setMessages((items) => [...items, { role: "ai", text: content }]);
+      updateMessages((items) => [...items, { role: "ai", text: content }]);
     } catch { /* surfaced in the UI */ } finally { setGenerating(false); }
   }
 
@@ -195,14 +235,29 @@ export default function Home() {
     if (nextPage) setActive(nextPage);
     try {
       const content = await askAI(prompt, task);
-      setMessages((items) => [...items, { role: "user", text: prompt }, { role: "ai", text: content }]);
+      updateMessages((items) => [...items, { role: "user", text: prompt }, { role: "ai", text: content }]);
       notify("AI 已完成生成，请在右侧查看并继续讨论");
     } catch { /* surfaced in the UI */ } finally { setGenerating(false); }
   }
 
   function addPreference() {
     const value = window.prompt("添加一个创作偏好，例如：无系统、群像、慢热感情线");
-    if (value?.trim()) setTags((items) => [...items, value.trim()]);
+    if (value?.trim()) updateWorkspace({ tags: [...tags, value.trim()] });
+  }
+
+  function createBlueprintSnapshot(label = "手动保存故事蓝图") {
+    const version = { id: `version-${Date.now()}`, label, createdAt: "刚刚", idea };
+    updateWorkspace({ versions: [version, ...workspace.versions] });
+    notify("已为当前小说创建故事蓝图快照");
+  }
+
+  function restoreBlueprintSnapshot(versionId: string) {
+    const version = workspace.versions.find((item) => item.id === versionId);
+    if (!version) return;
+    createBlueprintSnapshot("恢复前自动备份");
+    setBookIdea(version.idea);
+    setVersionsOpen(false);
+    notify(`已恢复“${version.label}”`);
   }
 
   if (screen === "shelf") {
@@ -210,7 +265,12 @@ export default function Home() {
       books={books}
       onOpenBook={openBook}
       onCreateBook={createBook}
-      onImportBooks={(items) => { setBooks((booksNow) => [...items, ...booksNow.filter((book) => !items.some((item) => item.id === book.id))]); notify(`已导入 ${items.length} 本小说`); }}
+      onImportBooks={(items, importedWorkspaces) => {
+        setBooks((booksNow) => [...items, ...booksNow.filter((book) => !items.some((item) => item.id === book.id))]);
+        if (importedWorkspaces) setWorkspaces((existing) => ({ ...existing, ...(importedWorkspaces as Record<string, BookWorkspace>) }));
+        notify(`已导入 ${items.length} 本小说${importedWorkspaces ? "及其工作区" : ""}`);
+      }}
+      onExportBooks={() => exportBookshelf(books, workspaces)}
     />;
   }
 
@@ -236,8 +296,8 @@ export default function Home() {
       <div className={`workspace ${rightOpen ? "" : "right-closed"}`}>
         <aside className="leftbar">
           <div className="progress-block">
-            <div className="progress-label"><span>创作准备度</span><strong>72%</strong></div><div className="progress-track"><span /></div>
-            <p>再完善人物关系，就可以稳定生成正文</p>
+            <div className="progress-label"><span>创作准备度</span><strong>{readiness}%</strong></div><div className="progress-track"><span style={{ width: `${readiness}%` }} /></div>
+            <p>已完成 {configuredAssets} 项设定，已加入 {references.length} 项借鉴。</p>
           </div>
           <nav>{navGroups.map((group) => <div className="nav-group" key={group.label}>
             <div className="nav-label">{group.label}</div>
@@ -245,11 +305,11 @@ export default function Home() {
               <Icon size={17} /><span>{item.label}</span>{item.badge && <em>{item.badge}</em>}
             </button>; })}
           </div>)}</nav>
-          <div className="memory-card"><div><Aperture size={16} /><strong>故事记忆</strong><span>健康</span></div><p>已记住 28 条设定、17 个伏笔与 12 章剧情。</p></div>
+          <div className="memory-card"><div><Aperture size={16} /><strong>故事记忆</strong><span>独立</span></div><p>《{currentBook.title}》已保存 {messages.length} 条对话、{references.length} 项借鉴与 {workspace.versions.length} 个快照。</p></div>
         </aside>
 
         <section className="canvas"><div className={active === "plot" ? "canvas-inner plot-canvas-inner" : "canvas-inner"}>
-          {active === "plot" ? <PlotWorkbench bookTitle={currentBook.title} references={references} onOpenReferences={() => openReferences("plot")} onGenerate={askAI} /> : active !== "overview" ? <AssetWorkbench bookTitle={currentBook.title} type={active} references={references} onOpenReferences={openReferences} onGenerate={askAI} onNotify={notify} /> : <>
+          {active === "plot" ? <PlotWorkbench bookTitle={currentBook.title} state={workspace.plot} references={references} onStateChange={(plot) => updateWorkspace({ plot })} onOpenReferences={() => openReferences("plot")} onGenerate={askAI} /> : active !== "overview" ? <AssetWorkbench book={currentBook} type={active} content={workspace.assets[active]} references={references} onContentChange={(content) => updateWorkspace({ assets: { ...workspace.assets, [active]: content } })} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onNotify={notify} /> : <>
           <div className="page-heading">
             <div><div className="eyebrow">{currentBook.title} / {currentLabel}</div><h1>故事蓝图</h1><p>先把故事想清楚，再让每一章稳定地长出来。</p></div>
             <div className="heading-actions">
@@ -260,8 +320,8 @@ export default function Home() {
 
           <section className="idea-card">
             <div className="idea-title"><Sparkles size={17} /><span>从一句话开始</span><em>AI 会补全冲突、代价与成长空间</em></div>
-            <Textarea aria-label="故事创意" value={idea} onChange={(event) => setIdea(event.target.value)} className="idea-input" />
-            <div className="idea-footer"><div className="chips">{tags.map((tag) => <button key={tag} onClick={() => setTags((items) => items.filter((item) => item !== tag))}>{tag} <X size={12} /></button>)}<button className="add-chip" onClick={addPreference}><Plus size={13} /> 添加偏好</button></div>
+            <Textarea aria-label="故事创意" value={idea} onChange={(event) => setBookIdea(event.target.value)} className="idea-input" />
+            <div className="idea-footer"><div className="chips">{tags.map((tag) => <button key={tag} onClick={() => updateWorkspace({ tags: tags.filter((item) => item !== tag) })}>{tag} <X size={12} /></button>)}<button className="add-chip" onClick={addPreference}><Plus size={13} /> 添加偏好</button></div>
               <Button className="magic-button" onClick={enrichIdea} disabled={generating}><Sparkles />{generating ? "正在推演…" : "让 AI 完善"}</Button>
             </div>
           </section>
@@ -270,16 +330,16 @@ export default function Home() {
 
           <div className="blueprint-grid">
             <article className="blueprint-card world-card">
-              <div className="card-kicker"><Box size={16} />世界内核<button className="reference-chip" onClick={() => openReferences("world")}><BookMarked />添加借鉴</button></div><h3>记忆是一种会被消耗的实体</h3>
-              <p>雾隐镇以“遗忘”向山神换取平静。每件旧物都封存着被献祭的记忆，而顾沉舟是唯一能听见它们的人。</p>
-              <div className="rule-list"><span><i>01</i>读取越深，遗忘越重要</span><span><i>02</i>同一段记忆不能被听见两次</span><span><i>03</i>大雾之外的人会逐渐忘记小镇</span></div>
+              <div className="card-kicker"><Box size={16} />世界内核<button className="reference-chip" onClick={() => openReferences("world")}><BookMarked />添加借鉴</button></div><h3>{currentBook.title}的世界规则</h3>
+              <p>{worldSummary}</p>
+              <div className="rule-list"><span><i>01</i>世界如何运转？</span><span><i>02</i>力量有什么代价？</span><span><i>03</i>什么规则不能被打破？</span></div>
               <button className="card-action" onClick={() => setActive("world")}>展开世界观 <span>→</span></button>
             </article>
             <article className="blueprint-card character-card">
               <div className="card-kicker"><CircleUserRound size={16} />核心人物<button className="reference-chip" onClick={() => openReferences("character")}><BookMarked />人物借鉴</button></div>
-              <div className="character-main"><div className="portrait portrait-one">顾</div><div><h3>顾沉舟</h3><small>主角 · 旧物修复师</small></div><button aria-label="更多人物操作" onClick={() => setActive("characters")}><MoreHorizontal size={18} /></button></div>
-              <div className="motive"><small>想要</small><p>找回母亲失踪的真相</p></div><div className="motive"><small>害怕</small><p>真相证明自己才是灾难源头</p></div>
-              <div className="portraits"><div className="portrait portrait-two">沈</div><div className="portrait portrait-three">祁</div><div className="portrait portrait-four">闻</div><div className="portrait portrait-five">+</div></div>
+              <div className="character-main"><div className="portrait portrait-one">人</div><div><h3>主角人物卡</h3><small>{characterSummary}</small></div><button aria-label="更多人物操作" onClick={() => setActive("characters")}><MoreHorizontal size={18} /></button></div>
+              <div className="motive"><small>想要</small><p>主角此刻最想得到什么？</p></div><div className="motive"><small>害怕</small><p>失去什么会让他无法承受？</p></div>
+              <div className="portraits"><div className="portrait portrait-two">关</div><div className="portrait portrait-three">敌</div><div className="portrait portrait-four">秘</div><div className="portrait portrait-five">+</div></div>
               <button className="card-action" onClick={() => setActive("characters")}>查看关系与弧光 <span>→</span></button>
             </article>
             <article className="blueprint-card timeline-card">
@@ -289,9 +349,9 @@ export default function Home() {
             </article>
             <article className="blueprint-card style-card">
               <div className="card-kicker"><Feather size={16} />文风指纹<button className="reference-chip" onClick={() => openReferences("style")}><BookMarked />文风借鉴</button></div>
-              <blockquote>“雨落在铜铃上，没有响。顾沉舟却听见了七年前，那扇门合拢的声音。”</blockquote>
-              <div className="style-tags"><span>短句推进</span><span>冷色意象</span><span>有限视角</span><span>留白悬念</span></div>
-              <div className="style-source"><span>参考方向</span><strong>中式志怪的幽微感 × 现代悬疑的紧迫感</strong></div>
+              <blockquote>“{styleSummary}”</blockquote>
+              <div className="style-tags"><span>叙事视角</span><span>句式节奏</span><span>核心意象</span><span>章节钩子</span></div>
+              <div className="style-source"><span>参考方向</span><strong>从借鉴资料中提取结构与可执行的风格参数</strong></div>
               <button className="card-action" onClick={() => setActive("style")}>调校文风 <span>→</span></button>
             </article>
           </div>
@@ -300,7 +360,7 @@ export default function Home() {
 
         <aside className="copilot">
           <div className="copilot-head"><div><span className="ai-orb"><Sparkles size={16} /></span><strong>共创助手</strong><i>在线</i></div><button aria-label="收起助手" onClick={() => setRightOpen(false)}><PanelRightClose size={18} /></button></div>
-          <div className="context-strip"><span>正在讨论</span><strong>{currentLabel}</strong><em>{model === "deepseek-v4-flash" ? "V4 Flash" : "V4 Pro"}</em><button onClick={() => setMessages([])}>清空</button></div>
+          <div className="context-strip"><span>正在讨论</span><strong>{currentLabel}</strong><em>{model === "deepseek-v4-flash" ? "V4 Flash" : "V4 Pro"}</em><button onClick={() => updateMessages([])}>清空</button></div>
           <div className="messages"><div className="day-divider"><span>今天</span></div>
             {messages.length === 0 && <div className="empty-chat">从一句模糊的想法开始就好。<br />我会帮你把它变成可写的故事。</div>}
             {messages.map((message, index) => <div className={`message ${message.role}`} key={`${message.text}-${index}`}>{message.role === "ai" && <div className="mini-orb"><Sparkles size={13} /></div>}<div className="message-bubble">{message.text}</div></div>)}
@@ -315,7 +375,7 @@ export default function Home() {
         </aside>
         {!rightOpen && <button className="reopen-copilot" onClick={() => setRightOpen(true)}><MessageCircleMore size={19} /><span>共创助手</span></button>}
       </div>
-      <ReferenceLibraryDialog open={referenceOpen} onOpenChange={setReferenceOpen} scope={referenceScope} selected={references} onAdd={addReference} />
+      <ReferenceLibraryDialog open={referenceOpen} onOpenChange={setReferenceOpen} scope={referenceScope} selected={references} onAdd={addReference} onRemove={removeReference} />
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="workspace-dialog sm:max-w-[560px]"><DialogHeader><DialogTitle>在《{currentBook.title}》中查找</DialogTitle><DialogDescription>快速前往设定、情节、大纲或正文。借鉴资料请进入“借鉴库”。</DialogDescription></DialogHeader>
         <label className="workspace-search"><Search /><input value={workspaceSearch} onChange={(event) => setWorkspaceSearch(event.target.value)} placeholder="搜索世界观、人物、情节、正文……" autoFocus /></label>
         <div className="workspace-search-results">{searchItems.map((item) => { const Icon = item.icon; return <button key={item.id} onClick={() => { if (item.id === "references") openReferences("plot"); else setActive(item.id); setSearchOpen(false); }}><span><Icon /><strong>{item.label}</strong></span><em>打开 →</em></button>; })}{searchItems.length === 0 && <p>没有匹配的工作区。</p>}</div>
@@ -325,11 +385,25 @@ export default function Home() {
         <div className="privacy-note"><Cpu /><div><strong>密钥保护已开启</strong><p>请在部署环境中配置 <code>DEEPSEEK_API_KEY</code>。前端代码、导出文件和 Git 提交均不包含密钥。</p></div></div>
         <div className="dialog-actions"><Button variant="outline" onClick={() => setScreen("shelf")}>返回书架</Button><Button onClick={() => { setSettingsOpen(false); notify("生成设置已保存"); }}>保存设置</Button></div>
       </DialogContent></Dialog>
-      <Dialog open={versionsOpen} onOpenChange={setVersionsOpen}><DialogContent className="workspace-dialog versions-dialog sm:max-w-[600px]"><DialogHeader><DialogTitle>故事蓝图版本</DialogTitle><DialogDescription>恢复旧版本前会自动保留当前内容，你可以随时切回来。</DialogDescription></DialogHeader>
-        <div className="version-list"><div className="current"><Clock3 /><span><strong>当前版本</strong><small>刚刚 · 手动编辑故事种子</small></span><em>使用中</em></div><div><Clock3 /><span><strong>AI 完善冲突与代价</strong><small>今天 14:32 · DeepSeek V4 Flash</small></span><Button size="sm" variant="outline" onClick={() => { setVersionsOpen(false); notify("已恢复该版本，原版本已自动保留"); }}>恢复</Button></div><div><Clock3 /><span><strong>创建小说</strong><small>昨天 21:08 · 初始故事蓝图</small></span><Button size="sm" variant="outline" onClick={() => { setVersionsOpen(false); notify("已恢复初始版本，原版本已自动保留"); }}>恢复</Button></div></div>
-        <div className="dialog-actions"><span>共 3 个版本</span><Button onClick={() => { setVersionsOpen(false); notify("已为当前故事蓝图创建快照"); }}>创建当前快照</Button></div>
+      <Dialog open={versionsOpen} onOpenChange={setVersionsOpen}><DialogContent className="workspace-dialog versions-dialog sm:max-w-[600px]"><DialogHeader><DialogTitle>《{currentBook.title}》的故事蓝图版本</DialogTitle><DialogDescription>恢复旧版本前会自动保留当前内容，你可以随时切回来。</DialogDescription></DialogHeader>
+        <div className="version-list"><div className="current"><Clock3 /><span><strong>当前编辑内容</strong><small>刚刚 · 独立保存于《{currentBook.title}》</small></span><em>使用中</em></div>{workspace.versions.map((version) => <div key={version.id}><Clock3 /><span><strong>{version.label}</strong><small>{version.createdAt}</small></span><Button size="sm" variant="outline" onClick={() => restoreBlueprintSnapshot(version.id)}>恢复</Button></div>)}</div>
+        <div className="dialog-actions"><span>共 {workspace.versions.length} 个快照</span><Button onClick={() => createBlueprintSnapshot()}>创建当前快照</Button></div>
       </DialogContent></Dialog>
       {toast && <div className="toast"><Check size={15} />{toast}</div>}
     </main>
   );
+}
+
+function firstLine(value?: string) {
+  return value?.split("\n").map((line) => line.replace(/^#+\s*/, "").trim()).find(Boolean) ?? "";
+}
+
+function exportBookshelf(books: BookProject[], workspaces: Record<string, BookWorkspace>) {
+  const blob = new Blob([JSON.stringify({ version: 2, books, workspaces }, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "墨脉完整书架备份.json";
+  anchor.click();
+  URL.revokeObjectURL(url);
 }

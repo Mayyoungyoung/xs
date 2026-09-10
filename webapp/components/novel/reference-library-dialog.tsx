@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { BookMarked, Check, ExternalLink, FileText, Globe2, LoaderCircle, Search, Upload } from "lucide-react";
+import { BookMarked, Check, ExternalLink, FileText, Globe2, LoaderCircle, Search, Trash2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
@@ -23,11 +23,12 @@ type Props = {
   scope: ReferenceScope;
   selected: ReferenceItem[];
   onAdd: (reference: ReferenceItem) => void;
+  onRemove: (reference: ReferenceItem) => void;
 };
 
 const scopeNames: Record<ReferenceScope, string> = { plot: "剧情结构", character: "人物设定", style: "文风指纹", world: "世界观" };
 
-export function ReferenceLibraryDialog({ open, onOpenChange, scope, selected, onAdd }: Props) {
+export function ReferenceLibraryDialog({ open, onOpenChange, scope, selected, onAdd, onRemove }: Props) {
   const [mode, setMode] = useState<"search" | "local">("search");
   const [query, setQuery] = useState("");
   const [kind, setKind] = useState(scope === "character" ? "character" : scope === "style" ? "author" : "novel");
@@ -88,7 +89,7 @@ export function ReferenceLibraryDialog({ open, onOpenChange, scope, selected, on
         {error && <div className="reference-error">{error}</div>}
         <div className="reference-results">
           {results.length === 0 && !loading && <div className="reference-empty"><BookMarked /><strong>建立自己的借鉴库</strong><p>搜索作品、类型、人物或作家，结果会作为生成时的结构参考。</p></div>}
-          {results.map((result) => { const added = selected.some((item) => item.id === result.id); return <article key={result.id}>
+          {results.map((result) => { const added = selected.some((item) => item.id === result.id && item.scope === scope); return <article key={result.id}>
             <div className="reference-result-icon">{result.source === "本地文件" ? <FileText /> : <BookMarked />}</div>
             <div><div className="reference-result-title"><strong>{result.title}</strong><span>{result.source}</span>{result.url && <a href={result.url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>查看来源 <ExternalLink /></a>}</div><p>{result.summary.slice(0, 190) || "暂无摘要"}</p></div>
             <Button variant={added ? "secondary" : "outline"} size="sm" disabled={added} onClick={() => onAdd(result)}>{added ? <><Check />已加入</> : "加入借鉴"}</Button>
@@ -99,6 +100,7 @@ export function ReferenceLibraryDialog({ open, onOpenChange, scope, selected, on
         <div className="upload-orb"><Upload /></div><strong>选择或拖入你的资料</strong><p>支持 TXT、Markdown、JSON；内容只在你主动生成时发送给所选模型。</p><Button variant="outline" onClick={(event) => { event.stopPropagation(); fileInput.current?.click(); }}>选择文件</Button>
         {error && <div className="reference-error">{error}</div>}
       </div>}
+      {selected.filter((item) => item.scope === scope).length > 0 && <section className="selected-references"><strong>已加入本书的{scopeNames[scope]}借鉴</strong>{selected.filter((item) => item.scope === scope).map((item) => <div key={`${item.id}-${item.scope}`}><span>{item.title}</span><button onClick={() => onRemove(item)} aria-label={`删除借鉴 ${item.title}`}><Trash2 />删除</button></div>)}</section>}
       <div className="reference-dialog-foot"><span>已选 {selected.filter((item) => item.scope === scope).length} 项 · 建议每次使用 1–3 项</span><Button onClick={() => onOpenChange(false)}>完成</Button></div>
     </DialogContent>
   </Dialog>;
