@@ -1,0 +1,9 @@
+[project]
+name = "novel-agent-system"
+version = "0.1.0"
+description = "CLI prototype for a multi-agent novel creation system."
+requires-python = ">=3.10"
+
+[project.scripts]
+novel-agent = "novel_agent.cli:main"
+

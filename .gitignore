@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+workspace/
+webapp/site-archive.tar.gz
+webapp/.sites-stage-*/
