@@ -8,9 +8,12 @@ import {
   Sparkles, WandSparkles, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { PlotWorkbench } from "@/components/novel/plot-workbench";
+import { AssetWorkbench } from "@/components/novel/asset-workbench";
+import { Bookshelf, initialBooks, type BookProject } from "@/components/novel/bookshelf";
 import { ReferenceLibraryDialog, type ReferenceItem, type ReferenceScope } from "@/components/novel/reference-library-dialog";
 
 const navGroups = [
@@ -42,6 +45,9 @@ const firstMessages = [
 ];
 
 export default function Home() {
+  const [screen, setScreen] = useState<"shelf" | "studio">("shelf");
+  const [books, setBooks] = useState<BookProject[]>(initialBooks);
+  const [currentBook, setCurrentBook] = useState<BookProject>(initialBooks[0]);
   const [active, setActive] = useState("overview");
   const [idea, setIdea] = useState("一个能听见旧物记忆的落魄修复师，回到被大雾封锁的故乡，发现所有人都在忘记同一天。");
   const [messages, setMessages] = useState(firstMessages);
@@ -54,7 +60,13 @@ export default function Home() {
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [referenceScope, setReferenceScope] = useState<ReferenceScope>("plot");
   const [aiError, setAiError] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [versionsOpen, setVersionsOpen] = useState(false);
+  const [workspaceSearch, setWorkspaceSearch] = useState("");
+  const [tags, setTags] = useState(["玄幻悬疑", "克制感情线"]);
   const currentLabel = useMemo(() => navGroups.flatMap((group) => group.items).find((item) => item.id === active)?.label, [active]);
+  const searchItems = useMemo(() => navGroups.flatMap((group) => group.items).filter((item) => item.label.includes(workspaceSearch.trim())), [workspaceSearch]);
 
   useEffect(() => {
     const modelContext = (document as Document & {
@@ -81,6 +93,7 @@ export default function Home() {
           throw new Error("故事构想至少需要两个字");
         }
         setIdea(nextIdea.trim());
+        setScreen("studio");
         return { status: "updated", idea: nextIdea.trim() };
       },
     }, { signal: lifecycle.signal })).catch(() => undefined);
@@ -91,12 +104,30 @@ export default function Home() {
     try {
       const saved = window.localStorage.getItem("momai-references");
       if (saved) setReferences(JSON.parse(saved) as ReferenceItem[]);
+      const savedBooks = window.localStorage.getItem("momai-books");
+      if (savedBooks) setBooks(JSON.parse(savedBooks) as BookProject[]);
     } catch { /* local reference cache is optional */ }
   }, []);
 
   useEffect(() => {
     window.localStorage.setItem("momai-references", JSON.stringify(references));
   }, [references]);
+
+  useEffect(() => {
+    window.localStorage.setItem("momai-books", JSON.stringify(books));
+  }, [books]);
+
+  function openBook(book: BookProject) {
+    setCurrentBook(book);
+    setIdea(book.premise);
+    setActive("overview");
+    setScreen("studio");
+  }
+
+  function createBook(book: BookProject) {
+    setBooks((items) => [book, ...items]);
+    openBook(book);
+  }
 
   function openReferences(scope: ReferenceScope) {
     setReferenceScope(scope);
@@ -118,7 +149,7 @@ export default function Home() {
         task,
         prompt,
         model,
-        context: `书名：灵脉残卷\n核心设想：${idea}\n当前页面：${currentLabel}`,
+        context: `书名：${currentBook.title}\n类型：${currentBook.genre}\n核心设想：${idea}\n当前页面：${currentLabel}`,
         references: references.filter((item) => item.scope === scope),
       }),
     });
@@ -159,22 +190,46 @@ export default function Home() {
     } catch { /* surfaced in the UI */ } finally { setGenerating(false); }
   }
 
+  async function runCommand(prompt: string, task: string, nextPage?: string) {
+    setGenerating(true);
+    if (nextPage) setActive(nextPage);
+    try {
+      const content = await askAI(prompt, task);
+      setMessages((items) => [...items, { role: "user", text: prompt }, { role: "ai", text: content }]);
+      notify("AI 已完成生成，请在右侧查看并继续讨论");
+    } catch { /* surfaced in the UI */ } finally { setGenerating(false); }
+  }
+
+  function addPreference() {
+    const value = window.prompt("添加一个创作偏好，例如：无系统、群像、慢热感情线");
+    if (value?.trim()) setTags((items) => [...items, value.trim()]);
+  }
+
+  if (screen === "shelf") {
+    return <Bookshelf
+      books={books}
+      onOpenBook={openBook}
+      onCreateBook={createBook}
+      onImportBooks={(items) => { setBooks((booksNow) => [...items, ...booksNow.filter((book) => !items.some((item) => item.id === book.id))]); notify(`已导入 ${items.length} 本小说`); }}
+    />;
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
         <div className="brand-mark"><span>墨</span></div>
         <div className="brand-name">墨脉 <em>AI 小说工作台</em></div>
-        <button className="book-switcher" onClick={() => notify("书籍切换器已打开")}>
-          <span className="book-dot">灵</span><span><strong>灵脉残卷</strong><small>玄幻悬疑 · 创作中</small></span><ChevronDown size={16} />
+        <button className="book-switcher" onClick={() => setScreen("shelf")}>
+          <span className="book-dot">{currentBook.glyph}</span><span><strong>{currentBook.title}</strong><small>{currentBook.genre} · 返回书架</small></span><ChevronDown size={16} />
         </button>
         <div className="top-actions">
           <div className="model-picker"><Cpu size={15} /><NativeSelect value={model} onChange={(event) => setModel(event.target.value)} size="sm" aria-label="生成模型">
             <NativeSelectOption value="deepseek-v4-flash">DeepSeek V4 Flash</NativeSelectOption>
             <NativeSelectOption value="deepseek-v4-pro">DeepSeek V4 Pro</NativeSelectOption>
           </NativeSelect></div>
-          <button className="icon-button" aria-label="搜索"><Search size={18} /></button>
-          <button className="icon-button" aria-label="设置"><Settings2 size={18} /></button>
-          <div className="save-state"><Check size={14} /> 已保存</div><button className="avatar">砚</button>
+          <button className="icon-button" aria-label="搜索" onClick={() => setSearchOpen(true)}><Search size={18} /></button>
+          <button className="icon-button" aria-label="设置" onClick={() => setSettingsOpen(true)}><Settings2 size={18} /></button>
+          <div className="save-state"><Check size={14} /> 已保存</div><button className="avatar" onClick={() => setSettingsOpen(true)}>砚</button>
         </div>
       </header>
 
@@ -194,24 +249,24 @@ export default function Home() {
         </aside>
 
         <section className="canvas"><div className={active === "plot" ? "canvas-inner plot-canvas-inner" : "canvas-inner"}>
-          {active === "plot" ? <PlotWorkbench references={references} onOpenReferences={() => openReferences("plot")} onGenerate={askAI} /> : <>
+          {active === "plot" ? <PlotWorkbench bookTitle={currentBook.title} references={references} onOpenReferences={() => openReferences("plot")} onGenerate={askAI} /> : active !== "overview" ? <AssetWorkbench bookTitle={currentBook.title} type={active} references={references} onOpenReferences={openReferences} onGenerate={askAI} onNotify={notify} /> : <>
           <div className="page-heading">
-            <div><div className="eyebrow">灵脉残卷 / {currentLabel}</div><h1>故事蓝图</h1><p>先把故事想清楚，再让每一章稳定地长出来。</p></div>
+            <div><div className="eyebrow">{currentBook.title} / {currentLabel}</div><h1>故事蓝图</h1><p>先把故事想清楚，再让每一章稳定地长出来。</p></div>
             <div className="heading-actions">
-              <Button variant="outline" className="soft-button" onClick={() => notify("已生成当前蓝图的版本快照")}><Clock3 />版本记录</Button>
-              <Button className="ink-button" onClick={() => notify("开始生成第一卷大纲")}><WandSparkles />生成卷章大纲</Button>
+              <Button variant="outline" className="soft-button" onClick={() => setVersionsOpen(true)}><Clock3 />版本记录</Button>
+              <Button className="ink-button" onClick={() => void runCommand("根据当前故事蓝图和已选剧情借鉴，生成第一卷的卷目标与前 12 章大纲。", "plot_update", "outline")}><WandSparkles />生成卷章大纲</Button>
             </div>
           </div>
 
           <section className="idea-card">
             <div className="idea-title"><Sparkles size={17} /><span>从一句话开始</span><em>AI 会补全冲突、代价与成长空间</em></div>
             <Textarea aria-label="故事创意" value={idea} onChange={(event) => setIdea(event.target.value)} className="idea-input" />
-            <div className="idea-footer"><div className="chips"><button>玄幻悬疑 <X size={12} /></button><button>克制感情线 <X size={12} /></button><button className="add-chip"><Plus size={13} /> 添加偏好</button></div>
+            <div className="idea-footer"><div className="chips">{tags.map((tag) => <button key={tag} onClick={() => setTags((items) => items.filter((item) => item !== tag))}>{tag} <X size={12} /></button>)}<button className="add-chip" onClick={addPreference}><Plus size={13} /> 添加偏好</button></div>
               <Button className="magic-button" onClick={enrichIdea} disabled={generating}><Sparkles />{generating ? "正在推演…" : "让 AI 完善"}</Button>
             </div>
           </section>
 
-          <div className="section-heading"><div><h2>你的故事骨架</h2><p>所有内容都可直接编辑，也可以让 AI 提出方案。</p></div><button className="quiet-link" onClick={() => notify("已检查：发现 2 个可增强项")}>检查完整度</button></div>
+          <div className="section-heading"><div><h2>你的故事骨架</h2><p>所有内容都可直接编辑，也可以让 AI 提出方案。</p></div><button className="quiet-link" onClick={() => void runCommand("检查当前故事蓝图在世界规则、人物动机、主支线因果和文风约束上是否完整，列出最需要补的三项。", "chat")}>检查完整度</button></div>
 
           <div className="blueprint-grid">
             <article className="blueprint-card world-card">
@@ -222,7 +277,7 @@ export default function Home() {
             </article>
             <article className="blueprint-card character-card">
               <div className="card-kicker"><CircleUserRound size={16} />核心人物<button className="reference-chip" onClick={() => openReferences("character")}><BookMarked />人物借鉴</button></div>
-              <div className="character-main"><div className="portrait portrait-one">顾</div><div><h3>顾沉舟</h3><small>主角 · 旧物修复师</small></div><button aria-label="更多人物操作"><MoreHorizontal size={18} /></button></div>
+              <div className="character-main"><div className="portrait portrait-one">顾</div><div><h3>顾沉舟</h3><small>主角 · 旧物修复师</small></div><button aria-label="更多人物操作" onClick={() => setActive("characters")}><MoreHorizontal size={18} /></button></div>
               <div className="motive"><small>想要</small><p>找回母亲失踪的真相</p></div><div className="motive"><small>害怕</small><p>真相证明自己才是灾难源头</p></div>
               <div className="portraits"><div className="portrait portrait-two">沈</div><div className="portrait portrait-three">祁</div><div className="portrait portrait-four">闻</div><div className="portrait portrait-five">+</div></div>
               <button className="card-action" onClick={() => setActive("characters")}>查看关系与弧光 <span>→</span></button>
@@ -261,6 +316,19 @@ export default function Home() {
         {!rightOpen && <button className="reopen-copilot" onClick={() => setRightOpen(true)}><MessageCircleMore size={19} /><span>共创助手</span></button>}
       </div>
       <ReferenceLibraryDialog open={referenceOpen} onOpenChange={setReferenceOpen} scope={referenceScope} selected={references} onAdd={addReference} />
+      <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="workspace-dialog sm:max-w-[560px]"><DialogHeader><DialogTitle>在《{currentBook.title}》中查找</DialogTitle><DialogDescription>快速前往设定、情节、大纲或正文。借鉴资料请进入“借鉴库”。</DialogDescription></DialogHeader>
+        <label className="workspace-search"><Search /><input value={workspaceSearch} onChange={(event) => setWorkspaceSearch(event.target.value)} placeholder="搜索世界观、人物、情节、正文……" autoFocus /></label>
+        <div className="workspace-search-results">{searchItems.map((item) => { const Icon = item.icon; return <button key={item.id} onClick={() => { if (item.id === "references") openReferences("plot"); else setActive(item.id); setSearchOpen(false); }}><span><Icon /><strong>{item.label}</strong></span><em>打开 →</em></button>; })}{searchItems.length === 0 && <p>没有匹配的工作区。</p>}</div>
+      </DialogContent></Dialog>
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}><DialogContent className="workspace-dialog settings-dialog sm:max-w-[560px]"><DialogHeader><DialogTitle>生成设置</DialogTitle><DialogDescription>模型设置只影响当前设备。DeepSeek API 密钥只从服务端环境变量读取，不会保存在书架数据或浏览器中。</DialogDescription></DialogHeader>
+        <label className="dialog-field"><span>默认模型</span><NativeSelect value={model} onChange={(event) => setModel(event.target.value)}><NativeSelectOption value="deepseek-v4-flash">DeepSeek V4 Flash · 速度优先</NativeSelectOption><NativeSelectOption value="deepseek-v4-pro">DeepSeek V4 Pro · 质量优先</NativeSelectOption></NativeSelect></label>
+        <div className="privacy-note"><Cpu /><div><strong>密钥保护已开启</strong><p>请在部署环境中配置 <code>DEEPSEEK_API_KEY</code>。前端代码、导出文件和 Git 提交均不包含密钥。</p></div></div>
+        <div className="dialog-actions"><Button variant="outline" onClick={() => setScreen("shelf")}>返回书架</Button><Button onClick={() => { setSettingsOpen(false); notify("生成设置已保存"); }}>保存设置</Button></div>
+      </DialogContent></Dialog>
+      <Dialog open={versionsOpen} onOpenChange={setVersionsOpen}><DialogContent className="workspace-dialog versions-dialog sm:max-w-[600px]"><DialogHeader><DialogTitle>故事蓝图版本</DialogTitle><DialogDescription>恢复旧版本前会自动保留当前内容，你可以随时切回来。</DialogDescription></DialogHeader>
+        <div className="version-list"><div className="current"><Clock3 /><span><strong>当前版本</strong><small>刚刚 · 手动编辑故事种子</small></span><em>使用中</em></div><div><Clock3 /><span><strong>AI 完善冲突与代价</strong><small>今天 14:32 · DeepSeek V4 Flash</small></span><Button size="sm" variant="outline" onClick={() => { setVersionsOpen(false); notify("已恢复该版本，原版本已自动保留"); }}>恢复</Button></div><div><Clock3 /><span><strong>创建小说</strong><small>昨天 21:08 · 初始故事蓝图</small></span><Button size="sm" variant="outline" onClick={() => { setVersionsOpen(false); notify("已恢复初始版本，原版本已自动保留"); }}>恢复</Button></div></div>
+        <div className="dialog-actions"><span>共 3 个版本</span><Button onClick={() => { setVersionsOpen(false); notify("已为当前故事蓝图创建快照"); }}>创建当前快照</Button></div>
+      </DialogContent></Dialog>
       {toast && <div className="toast"><Check size={15} />{toast}</div>}
     </main>
   );

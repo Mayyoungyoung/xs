@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { BookMarked, Check, FileText, Globe2, LoaderCircle, Search, Upload } from "lucide-react";
+import { BookMarked, Check, ExternalLink, FileText, Globe2, LoaderCircle, Search, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
@@ -45,18 +45,10 @@ export function ReferenceLibraryDialog({ open, onOpenChange, scope, selected, on
     if (!query.trim()) return;
     setLoading(true); setError("");
     try {
-      const wikiUrl = `https://zh.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=8&prop=extracts|info&exintro=1&explaintext=1&inprop=url&format=json&origin=*`;
-      const directResponse = await fetch(wikiUrl, { signal: AbortSignal.timeout(9000) });
-      const directData = await directResponse.json() as { query?: { pages?: Record<string, { pageid: number; title: string; extract?: string; fullurl?: string }> } };
-      const directResults: ReferenceItem[] = Object.values(directData.query?.pages ?? {}).map((page) => ({ id: `wiki-${page.pageid}`, title: page.title, summary: page.extract ?? "暂无公开摘要。", source: "维基百科", url: page.fullurl, kind, scope }));
-      if (directResults.length) {
-        setResults(directResults);
-      } else {
-        const response = await fetch("/api/references/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, kind }) });
-        const data = await response.json() as { results?: Omit<ReferenceItem, "scope">[]; error?: string };
-        if (!response.ok) throw new Error(data.error ?? "检索失败");
-        setResults((data.results ?? []).map((item) => ({ ...item, scope })));
-      }
+      const response = await fetch("/api/references/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, kind }), signal: AbortSignal.timeout(15000) });
+      const data = await response.json() as { results?: Omit<ReferenceItem, "scope">[]; error?: string };
+      if (!response.ok) throw new Error(data.error ?? "检索失败");
+      setResults((data.results ?? []).map((item) => ({ ...item, scope })));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "暂时无法检索");
     } finally { setLoading(false); }
@@ -78,7 +70,7 @@ export function ReferenceLibraryDialog({ open, onOpenChange, scope, selected, on
     <DialogContent className="reference-dialog sm:max-w-[760px]">
       <DialogHeader>
         <DialogTitle>添加{scopeNames[scope]}借鉴</DialogTitle>
-        <DialogDescription>检索公开简介，或加载你自己的文本。模型只提取结构与可描述特征，不复制原文。</DialogDescription>
+        <DialogDescription>同时检索公开网页、图书数据库与百科，或加载你自己的文本。模型只提取结构与可描述特征，不复制原文。</DialogDescription>
       </DialogHeader>
       <div className="reference-mode-tabs">
         <button className={mode === "search" ? "active" : ""} onClick={() => setMode("search")}><Globe2 size={16} />自己检索</button>
@@ -98,13 +90,13 @@ export function ReferenceLibraryDialog({ open, onOpenChange, scope, selected, on
           {results.length === 0 && !loading && <div className="reference-empty"><BookMarked /><strong>建立自己的借鉴库</strong><p>搜索作品、类型、人物或作家，结果会作为生成时的结构参考。</p></div>}
           {results.map((result) => { const added = selected.some((item) => item.id === result.id); return <article key={result.id}>
             <div className="reference-result-icon">{result.source === "本地文件" ? <FileText /> : <BookMarked />}</div>
-            <div><div className="reference-result-title"><strong>{result.title}</strong><span>{result.source}</span></div><p>{result.summary.slice(0, 190) || "暂无摘要"}</p></div>
+            <div><div className="reference-result-title"><strong>{result.title}</strong><span>{result.source}</span>{result.url && <a href={result.url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>查看来源 <ExternalLink /></a>}</div><p>{result.summary.slice(0, 190) || "暂无摘要"}</p></div>
             <Button variant={added ? "secondary" : "outline"} size="sm" disabled={added} onClick={() => onAdd(result)}>{added ? <><Check />已加入</> : "加入借鉴"}</Button>
           </article>; })}
         </div>
       </> : <div className="local-upload" onClick={() => fileInput.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void loadFiles(event.dataTransfer.files); }}>
         <input ref={fileInput} type="file" accept=".txt,.md,.json" multiple onChange={(event) => loadFiles(event.target.files)} />
-        <div className="upload-orb"><Upload /></div><strong>选择或拖入你的资料</strong><p>支持 TXT、Markdown、JSON；内容只在你主动生成时发送给所选模型。</p><Button variant="outline">选择文件</Button>
+        <div className="upload-orb"><Upload /></div><strong>选择或拖入你的资料</strong><p>支持 TXT、Markdown、JSON；内容只在你主动生成时发送给所选模型。</p><Button variant="outline" onClick={(event) => { event.stopPropagation(); fileInput.current?.click(); }}>选择文件</Button>
         {error && <div className="reference-error">{error}</div>}
       </div>}
       <div className="reference-dialog-foot"><span>已选 {selected.filter((item) => item.scope === scope).length} 项 · 建议每次使用 1–3 项</span><Button onClick={() => onOpenChange(false)}>完成</Button></div>

@@ -7,6 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import type { ReferenceItem } from "./reference-library-dialog";
 
 type Props = {
+  bookTitle: string;
   references: ReferenceItem[];
   onOpenReferences: () => void;
   onGenerate: (prompt: string, task: string) => Promise<string>;
@@ -27,10 +28,11 @@ const initialBranches = [
   { id: "town", title: "镇民 · 集体遗忘", color: "#8a7650", path: "M545 244 C625 500 930 495 1010 244", labels: [{ x: 690, y: 466, text: "名单消失" }, { x: 885, y: 466, text: "记忆暴动" }] },
 ];
 
-export function PlotWorkbench({ references, onOpenReferences, onGenerate }: Props) {
+export function PlotWorkbench({ bookTitle, references, onOpenReferences, onGenerate }: Props) {
   const [instruction, setInstruction] = useState("在第 8 章后增加一条围绕沈青霜身世的支线，第 20 章与主线交汇，但不要抢走主角的核心矛盾。");
   const [branches, setBranches] = useState(initialBranches);
   const [selected, setSelected] = useState("clue");
+  const [selectedNode, setSelectedNode] = useState("");
   const [loading, setLoading] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [version, setVersion] = useState(3);
@@ -50,12 +52,12 @@ export function PlotWorkbench({ references, onOpenReferences, onGenerate }: Prop
   }
 
   return <div className="plot-workbench">
-    <div className="page-heading plot-heading"><div><div className="eyebrow">灵脉残卷 / 主线与支线</div><h1>情节编排</h1><p>主线保持方向，支线从关键节点生长并在需要时回收。</p></div>
+    <div className="page-heading plot-heading"><div><div className="eyebrow">{bookTitle} / 主线与支线</div><h1>情节编排</h1><p>主线保持方向，支线从关键节点生长并在需要时回收。</p></div>
       <div className="plot-heading-actions"><span>蓝图 v{version}</span><Button variant="outline" onClick={onOpenReferences}><Plus />添加剧情借鉴</Button><Button className="ink-button" onClick={regenerate} disabled={loading}>{loading ? <LoaderCircle className="spin" /> : <RefreshCw />}按讨论更新图</Button></div>
     </div>
     <section className="plot-command-card"><div className="plot-command-title"><span><MessageCircleMore size={17} /></span><div><strong>告诉 AI 你想怎么改</strong><p>例如“第 12 章长出一条复仇支线，在第二卷结尾反噬主线”</p></div></div>
       <Textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} aria-label="情节图修改指令" />
-      <div className="plot-command-foot"><div className="active-reference-list"><span>本次借鉴</span>{plotRefs.length === 0 ? <button onClick={onOpenReferences}>尚未选择，点击添加</button> : plotRefs.slice(0, 3).map((item) => <button key={item.id}>{item.title}</button>)}</div><Button onClick={regenerate} disabled={loading}><Sparkles />讨论并重绘</Button></div>
+      <div className="plot-command-foot"><div className="active-reference-list"><span>本次借鉴</span>{plotRefs.length === 0 ? <button onClick={onOpenReferences}>尚未选择，点击添加</button> : plotRefs.slice(0, 3).map((item) => <button key={item.id} onClick={onOpenReferences} title="打开借鉴库管理">{item.title}</button>)}</div><Button onClick={regenerate} disabled={loading}><Sparkles />讨论并重绘</Button></div>
     </section>
     <section className="plot-board-shell">
       <div className="plot-board-toolbar"><div className="plot-legend"><span><i className="main-legend" />主线</span>{branches.map((branch) => <button className={selected === branch.id ? "active" : ""} onClick={() => setSelected(branch.id)} key={branch.id}><i style={{ background: branch.color }} />{branch.title}</button>)}</div>
@@ -67,10 +69,10 @@ export function PlotWorkbench({ references, onOpenReferences, onGenerate }: Prop
           <path className="main-path" d="M55 244 L1285 244" />
           {branches.map((branch) => <path key={branch.id} d={branch.path} className={selected === branch.id ? "branch-path selected" : "branch-path"} style={{ stroke: branch.color }} />)}
         </svg>
-        {mainNodes.map((node, index) => <button key={node.title} className="main-node" style={{ left: node.x, top: 199 }} onClick={() => setSelected("main")}>
+        {mainNodes.map((node, index) => <button key={node.title} className={`main-node ${selectedNode === node.title ? "selected" : ""}`} style={{ left: node.x, top: 199 }} onClick={() => { setSelected("main"); setSelectedNode(node.title); setInstruction(`围绕“${node.title}”继续拆分章节，补充冲突升级、人物选择和章尾钩子，并检查支线如何进入或离开主线。`); }}>
           <span className="main-node-dot">{index < 2 ? <Check /> : index + 1}</span><em>第 {node.chapter} 章</em><strong>{node.title}</strong><small>{node.note}</small><i className="node-add"><Plus /></i>
         </button>)}
-        {branches.flatMap((branch) => branch.labels.map((label) => <button key={`${branch.id}-${label.text}`} className={`branch-node ${selected === branch.id ? "selected" : ""}`} onClick={() => setSelected(branch.id)} style={{ left: label.x, top: label.y, borderColor: branch.color }}><i style={{ background: branch.color }} /><strong>{label.text}</strong><span>{branch.title}</span></button>))}
+        {branches.flatMap((branch) => branch.labels.map((label) => <button key={`${branch.id}-${label.text}`} className={`branch-node ${selected === branch.id ? "selected" : ""}`} onClick={() => { setSelected(branch.id); setSelectedNode(label.text); setInstruction(`调整“${branch.title}”中的“${label.text}”节点，让它更自然地影响主线，同时保持人物动机成立。`); }} style={{ left: label.x, top: label.y, borderColor: branch.color }}><i style={{ background: branch.color }} /><strong>{label.text}</strong><span>{branch.title}</span></button>))}
       </div></div>
       <div className="plot-board-foot"><span><GitBranch />当前显示 1 条主线、{branches.length} 条支线、{mainNodes.length + branches.length * 2} 个关键节点</span><p>点击任意节点可继续拆分章节或与 AI 讨论</p></div>
     </section>
