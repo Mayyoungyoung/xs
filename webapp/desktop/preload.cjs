@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("momaiDesktop", {
   readRecovery: () => ipcRenderer.invoke("library:recovery"),
   readSettings: () => ipcRenderer.invoke("settings:read"),
   saveKey: (key) => ipcRenderer.invoke("settings:key", key),
+  saveSearchKey: (key) => ipcRenderer.invoke("settings:search-key", key),
   saveModel: (model) => ipcRenderer.invoke("settings:model", model),
   info: () => ipcRenderer.invoke("app:info"),
   openDataFolder: () => ipcRenderer.invoke("app:open-data"),

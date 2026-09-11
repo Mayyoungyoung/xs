@@ -25,9 +25,11 @@ import { ModelSettings } from "@/components/novel/model-settings";
 import { CoCreationPanel } from "@/components/novel/co-creation-panel";
 import { desktopBridge } from "@/lib/desktop-bridge";
 import { writingGuidance } from "@/lib/writing-guidance";
-import { defaultChoice, readModelChoice, readSessionCredentials, saveModelChoice, saveSessionCredentials, type ModelChoice, type SessionCredentials } from "@/lib/model-credentials";
+import { defaultChoice, readModelChoice, readSearchCredentials, readSessionCredentials, saveModelChoice, saveSearchCredentials, saveSessionCredentials, type ModelChoice, type SearchCredentials, type SessionCredentials } from "@/lib/model-credentials";
+import { DEFAULT_SEARCH_PROVIDER } from "@/lib/reference-search";
 import { CUSTOM_PROVIDER_ID, DEFAULT_PROVIDER_ID, PROVIDERS, providerById, shortModelLabel, validModelName } from "@/lib/model-providers";
-import { applyProposalTransaction } from "@/lib/co-creation";
+import { applyProposalTransaction, buildContextPacket, makeTextProposal, MODULE_LABELS, targetKey, type CoTarget } from "@/lib/co-creation";
+import { emptyAssistDraft } from "@/lib/reference-assist";
 import type { AdoptOptions, AdoptOutcome } from "@/components/novel/co-creation-panel";
 
 const navGroups = [
@@ -66,6 +68,7 @@ export default function Home() {
   const [storageError, setStorageError] = useState("");
   const [saveState, setSaveState] = useState("正在读取…");
   const [credentials, setCredentials] = useState<SessionCredentials | null>(null);
+  const [searchCredentials, setSearchCredentials] = useState<SearchCredentials | null>(null);
   const [serverConfigured, setServerConfigured] = useState(false);
   const [connection, setConnection] = useState("正在检查模型配置…");
   const revision = useRef(0);
@@ -144,6 +147,7 @@ export default function Home() {
       setBooks(loaded.books); setWorkspaces(loaded.workspaces); setHydrated(true);
       if (window.matchMedia("(max-width: 1180px)").matches) setRightOpen(false);
       setCredentials(readSessionCredentials());
+      setSearchCredentials(readSearchCredentials());
       const savedChoice = readModelChoice();
       if (savedChoice) setChoice(savedChoice);
     }).catch((error) => { if (alive) { setStorageError(`读取失败，原始数据未覆盖。${error instanceof Error ? error.message : "请检查存储权限。"}`); setSaveState("读取失败"); } });
@@ -255,6 +259,45 @@ export default function Home() {
     return { ok: true, note: outcome.note };
   }
 
+  // 应用为本书文风 goes through the same candidate transaction as every other
+  // adoption, so the lock check, the conflict hash, the snapshot and the version
+  // record all apply. 收藏参考 never touches this path.
+  function applyStyleRules(ruleText: string, mode: "replace-all" | "append"): { ok: boolean; error?: string } {
+    const latest = mergeBookWorkspace(currentBook, workspacesRef.current[currentBook.id]);
+    const target: CoTarget = { moduleId: "style" };
+    const proposal = makeTextProposal({
+      bookId: currentBook.id, target, targetLabel: MODULE_LABELS.style,
+      content: latest.assets.style ?? "", after: ruleText, scope: "full",
+      baseRevision: latest.plot.version, threadKey: targetKey(target), instruction: "借鉴助手应用文风",
+    });
+    const outcome = applyProposalTransaction({
+      bookId: currentBook.id, workspace: { ...latest, coProposals: [...latest.coProposals, proposal] },
+      proposalId: proposal.id, mode, snapshot: withSnapshot,
+    });
+    if ("error" in outcome) return { ok: false, error: outcome.error };
+    setWorkspaces((items) => ({ ...items, [currentBook.id]: outcome.workspace }));
+    setBooks((items) => items.map((book) => book.id === currentBook.id ? { ...book, updatedAt: new Date().toISOString() } : book));
+    notify(outcome.note);
+    return { ok: true };
+  }
+
+  // The trial write uses the current chapter scene, produces an original sample
+  // only, and never writes the manuscript.
+  function trialPrompt(ruleText: string) {
+    const chapter = workspace.chapters.find((item) => item.id === workspace.activeChapterId) ?? workspace.chapters[0];
+    const hasScene = Boolean(chapter?.content?.trim());
+    return [
+      "你是小说主笔。请依据下面的「本次生效文风规则」写一段约 200–400 字的原创示范。",
+      "只输出示范正文，不要解释；必须是原创内容，不得复制任何原作文句，也不得声称是原作片段；不要改写、替换或续写作者的正文。",
+      hasScene
+        ? `以当前章节《${chapter.title}》已有的场景、人物与语气为准，写一段同场景的示范片段，不要重复已有正文。`
+        : "本章还没有正文，请写一个明确的原创测试场景（例如：雨夜的车站，主角在等一个不会来的人），用来说明这套规则的效果。",
+      "",
+      "【本次生效文风规则】",
+      ruleText,
+    ].join("\n");
+  }
+
   async function askAI(prompt: string, task = "chat", options?: PlotGenerationOptions) {
     if (requestController.current) throw new Error("已有生成任务，请等待完成或停止后重试。");
     const controller = new AbortController();
@@ -364,8 +407,26 @@ export default function Home() {
       throw new Error(reason instanceof Error && reason.name === "TimeoutError" ? "连接超时，请稍后重试。" : reason instanceof Error ? reason.message : "暂时无法连接模型。");
     }
   }
+  // A real probe: the search route reports each source's state, so "verified"
+  // means the official search provider actually answered with this key.
+  async function testSearchKey(key: string) {
+    const response = await fetch("/api/references/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(key ? { "X-Momai-Search-Key": key, "X-Momai-Search-Provider": DEFAULT_SEARCH_PROVIDER } : {}) },
+      body: JSON.stringify({ query: "余华", kind: "author", includeBooks: true }),
+      signal: AbortSignal.timeout(45000),
+    });
+    const data = await response.json() as { states?: Array<{ name: string; state: string; detail?: string }>; error?: string };
+    if (!response.ok) throw new Error(data.error ?? "联网检索失败。");
+    const official = (data.states ?? []).find((state) => state.name.includes("联网检索"));
+    if (!official) throw new Error("本次没有启用联网检索来源。");
+    if (official.state === "ok") return "检索服务已返回结果。";
+    if (official.state === "not_configured") throw new Error("未提供搜索密钥。");
+    throw new Error(official.detail ? `${official.detail}` : "搜索服务暂时不可用，请稍后重试。");
+  }
+
   function backToShelf() { setScreen("shelf"); setSettingsOpen(false); }
-  const settingsDialog = <ModelSettings open={settingsOpen} onOpenChange={setSettingsOpen} choice={choice} onChoiceChange={applyChoice} hasSessionKey={Boolean(credentials)} connection={connection} onSaveKey={async (key, target) => { await desktopBridge()?.saveKey(key); const next = key ? { provider: target.provider, key } : null; saveSessionCredentials(next); setCredentials(next); setConnection(key || serverConfigured ? "已配置 · 待测试连接" : "未配置模型密钥"); }} onTest={testConnection} bookTitle={screen === "studio" ? currentBook.title : undefined} onRename={() => { setSettingsOpen(false); setTextPrompt({ kind: "rename", value: currentBook.title }); }} />;
+  const settingsDialog = <ModelSettings open={settingsOpen} onOpenChange={setSettingsOpen} choice={choice} onChoiceChange={applyChoice} hasSessionKey={Boolean(credentials)} connection={connection} onSaveKey={async (key, target) => { await desktopBridge()?.saveKey(key); const next = key ? { provider: target.provider, key } : null; saveSessionCredentials(next); setCredentials(next); setConnection(key || serverConfigured ? "已配置 · 待测试连接" : "未配置模型密钥"); }} onTest={testConnection} hasSearchKey={Boolean(searchCredentials)} onSaveSearchKey={async (key) => { await desktopBridge()?.saveSearchKey(key); const next = key ? { provider: DEFAULT_SEARCH_PROVIDER, key } : null; saveSearchCredentials(next); setSearchCredentials(next); }} onTestSearch={testSearchKey} bookTitle={screen === "studio" ? currentBook.title : undefined} onRename={() => { setSettingsOpen(false); setTextPrompt({ kind: "rename", value: currentBook.title }); }} />;
 
   const storageBanner = storageError && <div className="storage-banner" role="alert">{storageError}<Button variant="outline" onClick={() => { if (hydrated) exportBookshelf(displayedBooks, workspaces); else void readRecoveryData().then((data) => downloadText(JSON.stringify(data, null, 2), "墨脉原始数据恢复包.json", "application/json")).catch(() => setStorageError("无法读取原始存储，请保留浏览器数据并检查存储权限。")); }}>{hydrated ? "导出当前备份" : "导出原始数据"}</Button><Button variant="outline" onClick={() => window.location.reload()}>重新载入</Button></div>;
   if (!hydrated) return <main className="shelf-shell"><div className="shelf-content"><h1>墨脉 · AI 小说工作台</h1><p>{storageError ? "原始数据仍保留在浏览器中。请勿清除网站数据。" : "正在读取你的书架…"}</p>{storageBanner}</div></main>;
@@ -480,7 +541,19 @@ export default function Home() {
           </div>
         </aside>}
       </div>
-      <ReferenceLibraryDialog key={`${currentBook.id}-${referenceScope}`} open={referenceOpen} onOpenChange={setReferenceOpen} scope={referenceScope} selected={references} onAdd={addReference} onRemove={removeReference} />
+      <ReferenceLibraryDialog key={`${currentBook.id}-${referenceScope}`} open={referenceOpen} onOpenChange={setReferenceOpen} scope={referenceScope} selected={references} onAdd={addReference} onRemove={removeReference}
+        bookId={currentBook.id}
+        assist={workspace.referenceAssist[referenceScope] ?? emptyAssistDraft(referenceScope)}
+        onAssistChange={(patch) => updateWorkspace((w) => {
+          const current = w.referenceAssist[referenceScope] ?? emptyAssistDraft(referenceScope);
+          const next = typeof patch === "function" ? patch(current) : { ...current, ...patch };
+          return { ...w, referenceAssist: { ...w.referenceAssist, [referenceScope]: next } };
+        })}
+        currentStyle={workspace.assets.style ?? ""}
+        onGenerateStyle={(prompt) => askAI(prompt, "style_reference")}
+        onTrialWrite={(ruleText) => askAI(trialPrompt(ruleText), "chapter_write", { packet: buildContextPacket({ workspace, target: { moduleId: "chapters", entityId: workspace.activeChapterId }, locks: workspace.locks }) })}
+        onApplyStyle={applyStyleRules}
+      />
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="workspace-dialog sm:max-w-[560px]"><DialogHeader><DialogTitle>在《{currentBook.title}》中查找</DialogTitle><DialogDescription>搜索设定内容、章节标题或正文，快速前往匹配的编辑器。借鉴资料请进入“借鉴库”。</DialogDescription></DialogHeader>
         <label className="workspace-search"><Search /><input value={workspaceSearch} onChange={(event) => setWorkspaceSearch(event.target.value)} placeholder="搜索世界观、人物、情节、正文……" autoFocus /></label>
         <div className="workspace-search-results">{searchItems.map((item) => { const Icon = item.icon; return <button key={item.id} onClick={() => { selectModule(item.id); setSearchOpen(false); }}><span><Icon /><strong>{item.label}</strong></span><em>打开 →</em></button>; })}{searchItems.length === 0 && <p>没有匹配的工作区。</p>}</div>

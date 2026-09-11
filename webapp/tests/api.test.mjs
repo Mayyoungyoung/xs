@@ -134,6 +134,49 @@ test("partial search results survive a malformed source and all failures are exp
 });
 
 
+test("reference search reads Baike directly, sends Bing the bare query, and ranks sources by trust", async () => {
+  const old = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    seen.push(target);
+    if (target.includes("baike.baidu.com/api/openapi")) {
+      return Response.json({ title: "诡秘之主", desc: "爱潜水的乌贼创作的长篇小说", abstract: "以蒸汽与机械交织的异世界为背景。", url: "https://baike.baidu.com/item/%E8%AF%A1%E7%A7%98%E4%B9%8B%E4%B8%BB", card: [{ name: "作者", value: ["<a href=\"/item/x\">爱潜水的乌贼</a>"] }, { name: "作品类型", value: ["玄幻"] }] });
+    }
+    if (target.includes("moegirl")) return Response.json({ query: { pages: { 1: { pageid: 1, title: "诡秘之主", extract: "爱潜水的乌贼所著的网络小说。", fullurl: "https://mzh.moegirl.org.cn/诡秘之主" } } } });
+    if (target.includes("bing.com")) return new Response('<rss><item><title>诡秘之主最新章节</title><link>https://www.mopbook.com/book/1.html</link><description>免费在线阅读</description></item><item><title>仙侠群像的写法</title><link>https://example.org/xianxia</link><description>谈谈群像叙事。</description></item></rss>');
+    throw new Error(`unexpected ${target}`);
+  };
+  try {
+    const data = await (await search(request({ query: "诡秘之主" }))).json();
+    assert.deepEqual(data.results.map((item) => item.source), ["百度百科", "萌娘百科"], "encyclopedia entries outrank web pages");
+    assert.ok(data.results[0].summary.includes("爱潜水的乌贼") && data.results[0].summary.includes("作品类型：玄幻"), "structured card fields join the abstract");
+    assert.ok(!data.results.some((item) => item.url.includes("mopbook")), "reading-app aggregators are dropped");
+    assert.equal(data.sources.find((source) => source.name === "百度百科").ok, true);
+
+    const bingUrl = seen.find((url) => url.includes("bing.com"));
+    //「汪曾祺 作家」makes Bing's RSS endpoint match single characters, so the suffix must stay out.
+    assert.ok(bingUrl.startsWith("https://cn.bing.com/search?q=%E8%AF%A1%E7%A7%98%E4%B9%8B%E4%B8%BB&"), bingUrl);
+    assert.ok(!/gsrsearch=%E4%BD%9C%E5%AE%B6|%E5%B0%8F%E8%AF%B4%20%E7%AE%80%E4%BB%8B/.test(bingUrl), "no type suffix is appended to the query");
+
+    const genre = await (await search(request({ query: "群像仙侠", kind: "genre" }))).json();
+    assert.ok(genre.results.some((item) => item.url === "https://example.org/xianxia"), "a 2-gram match keeps topic results that lack the full query string");
+  } finally { globalThis.fetch = old; }
+});
+
+test("unreachable reference sources are disclosed instead of failing silently", async () => {
+  const old = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("bing.com")) return new Response("<rss><item><title>雾城</title><link>https://example.org/book</link><description>雾城简介</description></item></rss>");
+    throw new Error("offline");
+  };
+  try {
+    const data = await (await search(request({ query: "雾城" }))).json();
+    assert.deepEqual(data.sources, [{ name: "百度百科", ok: false }, { name: "萌娘百科", ok: false }, { name: "网页搜索", ok: true }]);
+    assert.ok(data.note.includes("百度百科") && data.note.includes("萌娘百科"));
+  } finally { globalThis.fetch = old; }
+});
+
 test("a UI session key overrides environment credentials and is never echoed", async () => {
   const old = globalThis.fetch;
   process.env.DEEPSEEK_API_KEY = "environment-test-only";

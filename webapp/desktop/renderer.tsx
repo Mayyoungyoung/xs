@@ -9,6 +9,7 @@ async function start() {
   if (!bridge) throw new Error("软件初始化失败，请重新打开墨脉。");
   const settings = await bridge.readSettings();
   if (settings.apiKey) sessionStorage.setItem("momai-session-key", JSON.stringify({ provider: settings.provider, key: settings.apiKey }));
+  if (settings.searchKey) sessionStorage.setItem("momai-search-key", JSON.stringify({ provider: "zhipu", key: settings.searchKey }));
   localStorage.setItem("momai-model-choice", JSON.stringify({ provider: settings.provider, model: settings.model, ...(settings.baseUrl ? { baseUrl: settings.baseUrl } : {}) }));
   const originalFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
@@ -20,7 +21,14 @@ async function start() {
     const cancel = () => bridge.cancelApi(id);
     signal?.addEventListener("abort", cancel, { once: true });
     try {
-      const response = await bridge.callApi({ id, path: url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined, key: new Headers(init?.headers).get("X-Momai-API-Key") ?? undefined });
+      const headers = new Headers(init?.headers);
+      const response = await bridge.callApi({
+        id, path: url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined,
+        key: headers.get("X-Momai-API-Key") ?? undefined,
+        // The search credential is forwarded separately so it never merges with the writing key.
+        searchKey: headers.get("X-Momai-Search-Key") ?? undefined,
+        searchProvider: headers.get("X-Momai-Search-Provider") ?? undefined,
+      });
       signal?.throwIfAborted();
       return new Response(response.body, { status: response.status, headers: { "Content-Type": "application/json" } });
     } finally { signal?.removeEventListener("abort", cancel); }

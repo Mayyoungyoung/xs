@@ -6,7 +6,8 @@ import { z } from "zod";
 import { StorageLocation } from "./storage-location";
 import { GET as generateInfo, POST as generate } from "../app/api/generate/route";
 import { POST as search } from "../app/api/references/search/route";
-import { validApiKey } from "../lib/model-credentials";
+import { POST as referenceAssist } from "../app/api/references/assist/route";
+import { validApiKey, validSearchKey } from "../lib/model-credentials";
 
 const selfTest = process.argv.includes("--self-test");
 const userRoot = selfTest && process.env.MOMAI_TEST_ROOT ? path.resolve(process.env.MOMAI_TEST_ROOT) : path.join(app.getPath("appData"), "MomaiNovel");
@@ -17,7 +18,7 @@ const storage = new StorageLocation(userRoot);
 let window: BrowserWindow | undefined;
 let origin = "";
 const running = new Map<string, AbortController>();
-const requestSchema = z.object({ id: z.string().min(1).max(80), path: z.enum(["/api/generate", "/api/references/search"]), method: z.enum(["GET", "POST"]), body: z.string().max(400000).optional(), key: z.string().max(256).optional() });
+const requestSchema = z.object({ id: z.string().min(1).max(80), path: z.enum(["/api/generate", "/api/references/search", "/api/references/assist"]), method: z.enum(["GET", "POST"]), body: z.string().max(400000).optional(), key: z.string().max(256).optional(), searchKey: z.string().max(256).optional(), searchProvider: z.string().max(40).optional() });
 function trusted(event: IpcMainInvokeEvent) { return event.sender === window?.webContents && event.senderFrame === window.webContents.mainFrame && event.senderFrame?.url.startsWith(`${origin}/`); }
 function handle(channel: string, callback: (...args: never[]) => unknown) {
   ipcMain.handle(channel, (event, ...args) => { if (!trusted(event)) throw new Error("无效的软件窗口"); return callback(...args as never[]); });
@@ -28,11 +29,19 @@ async function saveKey(key: string) {
   if (key && !safeStorage.isEncryptionAvailable()) throw new Error("Windows 密钥加密暂不可用，密钥未保存。");
   await storage.run((store) => store.saveKey(key ? safeStorage.encryptString(key) : null));
 }
+// The search credential is validated and stored separately from the writing key.
+async function readSearchKey() { const data = await storage.run((store) => store.readSearchKey()); if (!data) return ""; if (!safeStorage.isEncryptionAvailable()) throw new Error("无法读取本机加密的搜索密钥，请检查 Windows 用户配置。"); return safeStorage.decryptString(data); }
+async function saveSearchKey(key: string) {
+  if (typeof key !== "string" || key && !validSearchKey(key)) throw new Error("搜索密钥格式不正确");
+  if (key && !safeStorage.isEncryptionAvailable()) throw new Error("Windows 密钥加密暂不可用，搜索密钥未保存。");
+  await storage.run((store) => store.saveSearchKey(key ? safeStorage.encryptString(key) : null));
+}
 handle("library:read", () => storage.run((store) => store.read()));
 handle("library:save", (library: unknown, revision: number) => storage.run((store) => store.save(library, revision)));
 handle("library:recovery", () => storage.run((store) => store.recovery()));
-handle("settings:read", async () => ({ apiKey: await readKey(), ...await storage.run((store) => store.readPreferences()) }));
+handle("settings:read", async () => ({ apiKey: await readKey(), searchKey: await readSearchKey(), ...await storage.run((store) => store.readPreferences()) }));
 handle("settings:key", saveKey);
+handle("settings:search-key", saveSearchKey);
 handle("settings:model", (choice: unknown) => storage.run((store) => store.savePreferences(choice)));
 handle("app:info", () => ({ dataPath: storage.directory }));
 handle("app:open-data", async () => { const failure = await shell.openPath(storage.directory); if (failure) throw new Error("无法打开数据文件夹"); });
@@ -51,8 +60,19 @@ handle("api:request", async (raw: unknown) => {
   if (running.has(input.id)) throw new Error("重复请求");
   const controller = new AbortController(); running.set(input.id, controller);
   try {
-    const request = new Request(`${origin}${input.path}`, { method: input.method, headers: { "Content-Type": "application/json", ...(input.key ? { "X-Momai-API-Key": input.key } : {}) }, ...(input.method === "POST" ? { body: input.body ?? "{}" } : {}), signal: controller.signal });
-    const result = input.path === "/api/generate" ? input.method === "GET" ? await generateInfo() : await generate(request) : input.method === "POST" ? await search(request) : Response.json({ error: "不支持的请求" }, { status: 405 });
+    const request = new Request(`${origin}${input.path}`, { method: input.method, headers: {
+      "Content-Type": "application/json",
+      ...(input.key ? { "X-Momai-API-Key": input.key } : {}),
+      // The search credential travels in its own header, never mixed with the writing key.
+      ...(input.searchKey ? { "X-Momai-Search-Key": input.searchKey } : {}),
+      ...(input.searchProvider ? { "X-Momai-Search-Provider": input.searchProvider } : {}),
+    }, ...(input.method === "POST" ? { body: input.body ?? "{}" } : {}), signal: controller.signal });
+    const unsupported = () => Response.json({ error: "不支持的请求" }, { status: 405 });
+    const result = input.path === "/api/generate"
+      ? input.method === "GET" ? await generateInfo() : await generate(request)
+      : input.path === "/api/references/search"
+        ? input.method === "POST" ? await search(request) : unsupported()
+        : input.method === "POST" ? await referenceAssist(request) : unsupported();
     return { status: result.status, body: await result.text() };
   } finally { running.delete(input.id); }
 });

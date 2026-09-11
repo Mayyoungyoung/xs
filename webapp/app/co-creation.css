@@ -33,6 +33,10 @@
 .co-reference-row { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #5f594f; }
 .co-reference-row span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .co-reference-row button { border: 0; background: transparent; color: #b0a99f; cursor: pointer; }
+.co-style-row { display: flex; align-items: baseline; gap: 8px; border-top: 1px dashed #ece8e2; padding-top: 6px; font-size: 11px; color: #5f594f; }
+.co-style-row span { color: #9a948a; font-size: 10px; }
+.co-style-row strong { font-weight: 600; }
+.co-style-row.is-off strong { color: #a8a29a; font-weight: 400; }
 .co-request { display: grid; gap: 5px; }
 .co-request > span { font-size: 11px; color: #6f685e; }
 .co-request textarea { min-height: 68px; font-size: 12px; }

@@ -1,5 +1,6 @@
 // Credentials deliberately live outside the book database and exports.
 import { DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID, providerById, validModelName, normalizeBaseUrl, CUSTOM_PROVIDER_ID } from "./model-providers";
+import { DEFAULT_SEARCH_PROVIDER } from "./reference-search";
 
 const SESSION_KEY = "momai-session-key";
 const LEGACY_SESSION_KEY = "momai-deepseek-session-key";
@@ -30,6 +31,31 @@ export function saveSessionCredentials(value: SessionCredentials | null): void {
 }
 
 export function validApiKey(value: string): boolean { return /^[\x21-\x7e]{10,256}$/.test(value); }
+
+// The search credential is deliberately separate from the writing credential:
+// it is stored under its own key, validated by the same format rule, and is only
+// ever sent to our own route, never to a model provider.
+const SEARCH_KEY = "momai-search-key";
+export type SearchCredentials = { provider: string; key: string };
+
+export function validSearchKey(value: string): boolean { return validApiKey(value); }
+
+export function readSearchCredentials(): SearchCredentials | null {
+  try {
+    const raw = sessionStorage.getItem(SEARCH_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SearchCredentials>;
+    if (typeof parsed.key !== "string" || !parsed.key.trim()) return null;
+    return { provider: typeof parsed.provider === "string" && parsed.provider ? parsed.provider : DEFAULT_SEARCH_PROVIDER, key: parsed.key };
+  } catch { return null; }
+}
+
+export function saveSearchCredentials(value: SearchCredentials | null): void {
+  try {
+    if (value) sessionStorage.setItem(SEARCH_KEY, JSON.stringify(value));
+    else sessionStorage.removeItem(SEARCH_KEY);
+  } catch { /* storage unavailable */ }
+}
 
 export function defaultChoice(): ModelChoice { return { provider: DEFAULT_PROVIDER_ID, model: DEFAULT_MODEL_ID }; }
 

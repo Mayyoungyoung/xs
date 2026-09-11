@@ -924,6 +924,10 @@ export type ContextPacket = {
   candidates: Array<{ id: string; label: string; instruction?: string; excerpt: string }>;
   trimming: string[];
   selectionText?: string;
+  // The style rules actually adopted for this book, with their revision. This is
+  // the same text injected into `text`, surfaced so the panel can show which
+  // style and version is in force for this request.
+  styleRules?: { text: string; version: number } | null;
 };
 
 export type CoContext = ContextPacket;
@@ -965,10 +969,21 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
   const prior = workspace.chapters.slice(Math.max(0, chapterIndex - 3), chapterIndex);
   const pending = input.pendingCandidates ?? [];
   const trimming: string[] = [];
+  const manuscript = MANUSCRIPT_TARGETS.has(target.moduleId);
+  const referenceLimit = manuscript ? 800 : 12000;
+  const referenceCount = manuscript ? 6 : 12;
 
   const settingsEntries = Object.entries(workspace.assets)
-    .filter(([key, value]) => key !== target.moduleId && Boolean(value?.trim()));
+    .filter(([key, value]) => key !== target.moduleId && key !== "style" && Boolean(value?.trim()));
   const settingsText = settingsEntries.map(([key, value]) => `【${ASSET_LABELS[key] ?? key}】\n${value.slice(0, 14000)}`).join("\n\n");
+  // The adopted style is injected as its own labelled block (not via 相关设定) so
+  // every writing entry reads one authoritative, versioned set of rules and the
+  // author's own instructions, locks and book settings still take precedence.
+  const styleText = (workspace.assets.style ?? "").trim();
+  const styleRules = styleText ? { text: styleText.slice(0, 14000), version: (workspace.assetVersions?.style?.length ?? 0) + 1 } : null;
+  const stylePart = styleRules && target.moduleId !== "style"
+    ? `【本次生效文风 · 第 ${styleRules.version} 版（只约束表达方式）】\n${styleRules.text}\n（本书的人物、设定、锁定内容与作者本次明确要求优先于以上文风规则；参考风格不得改变已发生的情节。）`
+    : "";
   const chapterPlan = target.moduleId === "chapters" ? chapterPlanText(workspace, target) : "";
   const eventText = targetEvent ? `【当前事件】\n${JSON.stringify({ id: targetEvent.id, title: targetEvent.title, note: targetEvent.note, chapter: targetEvent.chapter, order: targetEvent.order, status: targetEvent.status })}\n属于故事线：${roadmap.lines.filter((line) => line.eventIds.includes(targetEvent.id)).map((line) => line.title).join("、")}` : "";
   const lineText = targetLine ? `【当前故事线】\n${JSON.stringify({ id: targetLine.id, title: targetLine.title, goal: targetLine.goal, kind: targetLine.kind })}\n事件顺序：${targetLine.eventIds.map((id) => roadmap.events.find((event) => event.id === id)?.title ?? id).join(" → ")}` : "";
@@ -977,7 +992,7 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
     : "";
   const selectionText = selection ? `【作者选中的内容】\n${selection.text}` : "";
   const priorText = prior.map((chapter) => `【前文：${chapter.title}，末尾片段】\n${chapter.content.slice(-5000)}`).join("\n\n");
-  const referenceText = references.slice(-12).map((item, index) => `${index + 1}. ${item.title} [${item.kind}]\n${item.summary.slice(0, 12000)}`).join("\n\n");
+  const referenceText = references.slice(-referenceCount).map((item, index) => `${index + 1}. ${item.title} [${item.kind}]\n${item.summary.slice(0, referenceLimit)}`).join("\n\n");
 
   const parts = [
     `【本次目标】${label}`,
@@ -985,6 +1000,7 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
     `【当前内容】\n${text.slice(0, 24000) || "（当前为空）"}`,
     selectionText,
     settingsText,
+    stylePart,
     chapterPlan,
     eventText,
     lineText,
@@ -993,7 +1009,7 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
     `【世界线写作约束】剧情事件是计划，不是已经发生的正文事实；未选中的后续事件只作伏笔。`,
     priorText,
     `【讨论摘要】\n${summarizeThread(thread?.messages ?? [])}`,
-    referenceText ? `【参考材料】\n${referenceText}` : "",
+    referenceText ? `【参考材料${manuscript ? "（仅作结构参考，不要写入正文，也不要当作文风依据）" : ""}】\n${referenceText}` : "",
   ].filter(Boolean);
   let assembled = parts.join("\n\n");
   if (assembled.length > budget) {
@@ -1017,7 +1033,8 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
     target, targetLabel: label, locked, sections, text: assembled,
     discussionSummary: summarizeThread(thread?.messages ?? []),
     ...(scope ? { referenceScope: scope } : {}),
-    references: references.slice(-12).map((item) => ({ title: item.title.slice(0, 500), kind: item.kind.slice(0, 100), summary: item.summary.slice(0, 12000) })),
+    references: references.slice(-referenceCount).map((item) => ({ title: item.title.slice(0, 500), kind: item.kind.slice(0, 100), summary: item.summary.slice(0, referenceLimit) })),
+    styleRules,
     candidates: pending.map((candidate) => ({
       id: candidate.id, label: candidate.targetLabel,
       ...(candidate.instruction ? { instruction: candidate.instruction } : {}),
@@ -1060,7 +1077,13 @@ export type WorkspaceLike = {
   activeChapterId: string;
   references: Array<{ id: string; title: string; kind: string; summary: string; scope: string }>;
   plot: PlotLike;
+  assetVersions?: Record<string, Array<{ id: string }>>;
 };
+
+// Targets whose request writes or rewrites prose: raw reference material is
+// condensed hard so the manuscript call carries the adopted rules instead of
+// author biographies, other books' plots and encyclopedia summaries.
+const MANUSCRIPT_TARGETS = new Set<string>(["chapters", "outline", "timeline", "roadmap", "event", "line"]);
 
 // Text of the target the author is working on. Structured targets read their
 // real field instead of an empty assets entry.

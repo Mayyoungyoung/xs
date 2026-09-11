@@ -4,8 +4,9 @@ import { Check, Eye, EyeOff, KeyRound, LoaderCircle, ShieldCheck, Trash2 } from 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
-import { validApiKey, type ModelChoice } from "@/lib/model-credentials";
+import { validApiKey, validSearchKey, type ModelChoice } from "@/lib/model-credentials";
 import { CUSTOM_PROVIDER_ID, PROVIDERS, defaultModelOf, normalizeBaseUrl, providerById, validModelName } from "@/lib/model-providers";
+import { SEARCH_PROVIDERS } from "@/lib/reference-search";
 import { desktopBridge } from "@/lib/desktop-bridge";
 
 type Props = {
@@ -17,6 +18,9 @@ type Props = {
   connection: string;
   onSaveKey: (key: string, choice: ModelChoice) => void | Promise<void>;
   onTest: (key: string | undefined, choice: ModelChoice) => Promise<void>;
+  hasSearchKey?: boolean;
+  onSaveSearchKey?: (key: string) => void | Promise<void>;
+  onTestSearch?: (key: string) => Promise<string>;
   bookTitle?: string;
   onRename?: () => void;
 };
@@ -34,13 +38,15 @@ function modelListedFor(value: ModelChoice): boolean {
   return Boolean(providerById(value.provider)?.models.some((model) => model.id === value.model));
 }
 
-export function ModelSettings({ open, onOpenChange, choice, onChoiceChange, hasSessionKey, connection, onSaveKey, onTest, bookTitle, onRename }: Props) {
+export function ModelSettings({ open, onOpenChange, choice, onChoiceChange, hasSessionKey, connection, onSaveKey, onTest, hasSearchKey, onSaveSearchKey, onTestSearch, bookTitle, onRename }: Props) {
   const [draftChoice, setDraftChoice] = useState<ModelChoice>(choice);
   const [customModel, setCustomModel] = useState("");
   const [customSelected, setCustomSelected] = useState(false);
   const [customBase, setCustomBase] = useState("");
   const [draft, setDraft] = useState("");
   const [visible, setVisible] = useState(false);
+  const [searchDraft, setSearchDraft] = useState("");
+  const [searchVisible, setSearchVisible] = useState(false);
   const [testing, setTesting] = useState(false);
   const [message, setMessage] = useState("");
   const [dataPath, setDataPath] = useState("");
@@ -59,6 +65,7 @@ export function ModelSettings({ open, onOpenChange, choice, onChoiceChange, hasS
       setCustomModel(modelListedFor(next) ? "" : next.model);
       setCustomBase(next.baseUrl ?? "");
       setDraft(""); setVisible(false); setMessage("");
+      setSearchDraft(""); setSearchVisible(false);
     }
   }
   useEffect(() => { if (open && desktop) void desktop.info().then((info) => setDataPath(info.dataPath)).catch(() => setMessage("无法读取数据目录")); }, [open, desktop]);
@@ -116,6 +123,29 @@ export function ModelSettings({ open, onOpenChange, choice, onChoiceChange, hasS
     });
   }
 
+  async function saveSearchKey() {
+    const key = searchDraft.trim();
+    if (!validSearchKey(key)) { setMessage("请输入有效的搜索 API Key，不要包含空格或中文。"); return; }
+    await run(async () => {
+      try {
+        const status = await onTestSearch?.(key);
+        await onSaveSearchKey?.(key);
+        setSearchDraft(""); setSearchVisible(false);
+        setMessage(`搜索密钥已单独验证并保存，联网检索将使用它。${status ? ` ${status}` : ""}`);
+      } catch (reason) {
+        setMessage(`搜索密钥验证未通过，未保存：${reason instanceof Error ? reason.message : "请检查密钥与网络后重试。"}`);
+        throw reason;
+      }
+    }).catch(() => undefined);
+  }
+
+  async function clearSearchKey() {
+    await run(async () => {
+      try { await onSaveSearchKey?.(""); setMessage("搜索密钥已清除，联网检索会停止使用。"); }
+      catch { setMessage("清除失败，请检查存储权限。"); }
+    });
+  }
+
   async function changeStorage() {
     if (!desktop) return;
     setTesting(true); setMigrating(true); setMessage("");
@@ -142,6 +172,13 @@ export function ModelSettings({ open, onOpenChange, choice, onChoiceChange, hasS
     {message && <p className="settings-feedback" role="status">{message}</p>}
     <div className="settings-key-actions"><Button disabled={testing || !draft.trim()} onClick={() => void save()}><Check />验证并保存</Button><Button variant="outline" disabled={testing} onClick={() => void test()}>{testing ? <LoaderCircle className="spin" /> : <ShieldCheck />}{testing ? "正在处理…" : "测试连接"}</Button>{hasSessionKey && <Button variant="ghost" disabled={testing} onClick={() => void clear()}><Trash2 />清除密钥</Button>}</div>
     <p className="settings-help">保存前会先用一句测试消息验证密钥可用（消耗少量额度，不发送小说内容），验证失败不会保存。</p>
+    <section className="settings-search">
+      <strong>联网检索密钥（可选）</strong>
+      <p>搜索密钥与创作密钥<b>分开保存和验证</b>，只用于查找公开资料；不会用它调用模型，也不会写进小说数据、导出备份或分享内容。未配置时仍可生成“AI 初步归纳，未联网核验”的方案。</p>
+      <label className="form-field"><span>{SEARCH_PROVIDERS[0].keyLabel}</span><div className="secret-input"><input type={searchVisible ? "text" : "password"} aria-label={SEARCH_PROVIDERS[0].keyLabel} value={searchDraft} onChange={(event) => setSearchDraft(event.target.value)} placeholder={hasSearchKey ? "已保存，输入新密钥可替换" : "未配置搜索密钥"} autoComplete="off" spellCheck={false} maxLength={256} /><button type="button" onClick={() => setSearchVisible(!searchVisible)} aria-label={searchVisible ? "隐藏搜索密钥" : "显示搜索密钥"}>{searchVisible ? <EyeOff /> : <Eye />}</button></div></label>
+      <div className="settings-key-actions"><Button disabled={testing || !searchDraft.trim()} onClick={() => void saveSearchKey()}>{testing ? <LoaderCircle className="spin" /> : <Check />}验证并保存搜索密钥</Button>{hasSearchKey && <Button variant="ghost" disabled={testing} onClick={() => void clearSearchKey()}><Trash2 />清除搜索密钥</Button>}</div>
+      <p>验证会真实发起一次检索来确认密钥可用，失败不会保存。</p>
+    </section>
     {desktop && <div className="settings-storage"><strong>小说存储位置</strong><p>{dataPath || "正在读取数据目录…"}</p><span>可选择 D 盘等位置的空文件夹，所有小说、章节、自动备份与加密密钥会一起迁移。校验成功后立即使用新位置，原目录暂时保留。</span><div className="settings-storage-actions"><Button variant="outline" disabled={testing} onClick={() => void desktop.openDataFolder().catch(() => setMessage("无法打开数据文件夹"))}>打开数据文件夹</Button><Button variant="outline" disabled={testing} onClick={() => void changeStorage()}>{migrating && <LoaderCircle className="spin" />}{migrating ? "正在选择或迁移…" : "更改位置并迁移"}</Button></div><p>仅启动定位配置和界面缓存仍在系统用户目录。网页版小说可通过完整备份导入。</p></div>}
     {bookTitle && <div className="settings-book"><span>当前小说：{bookTitle}</span><Button variant="outline" size="sm" onClick={onRename}>修改书名</Button></div>}
     <div className="dialog-actions"><Button variant="outline" disabled={testing} onClick={() => { setDraft(""); onOpenChange(false); }}>完成</Button></div>

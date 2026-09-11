@@ -82,5 +82,9 @@ export class DesktopStore {
   }
   async readKey() { try { return await readFile(path.join(this.directory, "credentials.bin")); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; } }
   async saveKey(data: Uint8Array | null) { if (data) await atomicWrite(path.join(this.directory, "credentials.bin"), data); else await unlink(path.join(this.directory, "credentials.bin")).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
-  async writeNote() { await mkdir(this.directory, { recursive: true }); await writeFile(path.join(this.directory, "说明.txt"), "墨脉桌面版数据目录\n\nlibrary.json：全部小说、章节、世界线与版本记录。\nbackups：自动保留的最近 20 份完整书架备份，可在软件中导入。\ncredentials.bin：Windows 加密的模型密钥，与小说备份分开保存。\n\n请在软件关闭后复制整个文件夹以进行额外备份。不要在软件运行时手动改写 library.json。\n", "utf8"); }
+  // The optional search credential gets its own file so it never shares a slot
+  // with the writing key and is never part of the library or its backups.
+  async readSearchKey() { try { return await readFile(path.join(this.directory, "search-credentials.bin")); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; } }
+  async saveSearchKey(data: Uint8Array | null) { if (data) await atomicWrite(path.join(this.directory, "search-credentials.bin"), data); else await unlink(path.join(this.directory, "search-credentials.bin")).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
+  async writeNote() { await mkdir(this.directory, { recursive: true }); await writeFile(path.join(this.directory, "说明.txt"), "墨脉桌面版数据目录\n\nlibrary.json：全部小说、章节、世界线与版本记录。\nbackups：自动保留的最近 20 份完整书架备份，可在软件中导入。\ncredentials.bin：Windows 加密的模型密钥，与小说备份分开保存。\nsearch-credentials.bin：Windows 加密的联网检索密钥（可选），与模型密钥分开保存，未配置时也能生成初步方案。\n\n请在软件关闭后复制整个文件夹以进行额外备份。不要在软件运行时手动改写 library.json。\n", "utf8"); }
 }

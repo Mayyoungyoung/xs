@@ -236,6 +236,7 @@ export function CoCreationPanel({ bookId, workspace, target, busy, modelConnecti
       </dl>
       <div className="co-references">
         <header><strong>参考范围</strong><span>{packet.referenceScope ? `仅发送「${packet.referenceScope}」类借鉴 ${packet.references.length} 项` : `发送全部借鉴 ${packet.references.length} 项`}</span></header>
+        <div className={`co-style-row ${packet.styleRules ? "" : "is-off"}`}><span>本次生效文风</span><strong>{packet.styleRules ? `第 ${packet.styleRules.version} 版 · ${packet.styleRules.text.length.toLocaleString()} 字规则` : "尚未应用文风"}</strong></div>
         {workspace.references.filter((item) => !packet.referenceScope || item.scope === packet.referenceScope).slice(0, 5).map((item) => <div key={`${item.id}-${item.scope}`} className="co-reference-row"><span>{item.title}</span><button type="button" aria-label={`从本目标移除借鉴 ${item.title}`} title="只从本目标的参考范围移除，不会删除借鉴库中的资料" onClick={() => onRemoveReference(item)}><X /></button></div>)}
         {packet.trimming.map((note) => <p key={note} className="co-trimming" role="status">{note}</p>)}
         <Button variant="outline" size="sm" onClick={() => onOpenReferences((packet.referenceScope as ReferenceScope) ?? "plot")}>查看或增减借鉴</Button>

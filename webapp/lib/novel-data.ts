@@ -8,9 +8,19 @@ export const bookSchema = z.object({
   words: z.number().nonnegative().default(0), progress: z.number().min(0).max(100).default(0),
   updatedAt: z.string().default(""), accent: z.string().regex(/^#[0-9a-f]{6}$/i).default("#7f302a"), glyph: z.string().max(8).default("书"),
 });
+// Evidence metadata is additive and optional, so an older ReferenceItem without
+// it still parses. kind is a closed set: a migrated entry can never be relabelled
+// as a prose sample by accident.
+const referenceEvidenceSchema = z.object({
+  evidenceId: z.string().min(1).max(160), kind: z.enum(["encyclopedia", "metadata", "analysis", "prose", "model"]),
+  source: z.string().max(160), url: z.string().max(1200).optional(), retrievedAt: z.string().max(60),
+  retrieved: z.boolean(), chars: z.number().nonnegative().max(20000000).optional(), note: z.string().max(600).optional(),
+});
 export const referenceSchema = z.object({ id, title: z.string(), kind: z.string(), summary: z.string(), source: z.string(),
   url: z.string().refine((s) => !s || /^https?:\/\//i.test(s), "来源链接必须是 HTTP 或 HTTPS").optional(),
   scope: z.enum(["plot", "character", "style", "world"]),
+  entity: z.string().max(200).optional(), tier: z.number().int().min(0).max(9).optional(),
+  evidence: referenceEvidenceSchema.optional(),
 });
 const branchSchema = z.object({ from: z.number().int().nonnegative().optional(), to: z.number().int().nonnegative().optional(), status: z.enum(["planned", "active", "resolved"]).optional(), id, title: z.string(), color: z.string().regex(/^#[0-9a-f]{6}$/i), path: z.string(), labels: z.array(z.object({ x: z.number().finite(), y: z.number().finite(), text: z.string() })) });
 export const plotNodeSchema = z.object({ title: z.string().min(1).max(80), chapter: z.string().min(1).max(40), note: z.string().max(400) });
@@ -36,6 +46,10 @@ export const workspaceSchema = storySchema.partial().extend({
   coProposals: z.array(z.unknown()).max(400).optional(),
   locks: z.record(z.string(), z.unknown()).optional(),
   view: z.record(z.string(), z.unknown()).optional(),
+  // Per-scope 借鉴助手 drafts: the author's input, the identification, the
+  // evidence obtained and the candidate. Working state, so it stays out of
+  // content snapshots. Parsed tolerantly and normalized on load.
+  referenceAssist: z.record(z.string(), z.unknown()).optional(),
 });
 const backupSchema = z.object({ version: z.union([z.literal(2), z.literal(3)]).optional(), books: z.array(bookSchema), workspaces: z.record(id, workspaceSchema).default({}) });
 

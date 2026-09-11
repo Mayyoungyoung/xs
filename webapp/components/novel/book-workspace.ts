@@ -2,6 +2,7 @@ import type { BookProject } from "./bookshelf";
 import type { ReferenceItem } from "./reference-library-dialog";
 import { getRoadmap, worldlineContext, type StoryRoadmap } from "@/lib/story-roadmap";
 import { normalizeLocks, normalizeProposals, normalizeThreads, normalizeView, type CoProposalRecord, type CoThreads, type ContextPacket, type LockMap } from "@/lib/co-creation";
+import { normalizeAssistDrafts, type AssistDraft } from "@/lib/reference-assist";
 
 export type StoryMessage = { role: "ai" | "user"; text: string };
 // A context packet, when present, is the exact payload sent to the model.
@@ -63,6 +64,8 @@ export type BookWorkspace = {
   coProposals: CoProposalRecord[];
   locks: LockMap;
   view: Record<string, Record<string, number>>;
+  // 借鉴助手 state per module scope (input, identification, evidence, candidate).
+  referenceAssist: Record<string, AssistDraft>;
 };
 
 // Viewport/zoom preferences are stored per module and never touch revisions.
@@ -85,6 +88,7 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
     coProposals: [],
     locks: {},
     view: {},
+    referenceAssist: {},
     plot: {
       instruction: `为《${book.title}》设计一条围绕核心冲突展开的支线，在中段与主线交汇，并在结局前回收。`,
       branches: [],
@@ -99,11 +103,12 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
 
 // Input coming from storage, imports or the desktop bridge: content fields are
 // typed, while co-creation state arrives unvalidated and gets normalized below.
-export type SavedWorkspaceInput = Partial<Omit<BookWorkspace, "threads" | "coProposals" | "locks" | "view">> & {
+export type SavedWorkspaceInput = Partial<Omit<BookWorkspace, "threads" | "coProposals" | "locks" | "view" | "referenceAssist">> & {
   threads?: unknown;
   coProposals?: unknown;
   locks?: unknown;
   view?: unknown;
+  referenceAssist?: unknown;
 };
 
 export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInput | null): BookWorkspace {
@@ -122,6 +127,7 @@ export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInpu
     coProposals: normalizeProposals(saved.coProposals).filter((proposal) => proposal.bookId === book.id),
     locks: normalizeLocks(saved.locks),
     view: normalizeView(saved.view),
+    referenceAssist: normalizeAssistDrafts(saved.referenceAssist),
     plot: { ...base.plot, ...saved.plot, branches: saved.plot?.branches ?? base.plot.branches },
     versions: saved.versions?.length ? saved.versions : base.versions,
   };
