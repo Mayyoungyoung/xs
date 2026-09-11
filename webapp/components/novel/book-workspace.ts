@@ -1,9 +1,10 @@
 import type { BookProject } from "./bookshelf";
 import type { ReferenceItem } from "./reference-library-dialog";
 import { getRoadmap, worldlineContext, type StoryRoadmap } from "@/lib/story-roadmap";
+import { normalizeLocks, normalizeProposals, normalizeThreads, normalizeView, type CoProposalRecord, type CoThreads, type LockMap } from "@/lib/co-creation";
 
 export type StoryMessage = { role: "ai" | "user"; text: string };
-export type PlotGenerationOptions = { messages: StoryMessage[]; context?: string };
+export type PlotGenerationOptions = { messages?: StoryMessage[]; context?: string };
 export type PlotProposal = { summary: string; nodes: Array<{ title: string; chapter: string; note: string }>; branches: PlotBranch[]; roadmap?: StoryRoadmap };
 
 export type PlotBranch = {
@@ -57,7 +58,14 @@ export type BookWorkspace = {
   assetVersions: Record<string, AssetVersion[]>;
   proposals: Record<string, string>;
   reviews: Record<string, string>;
+  threads: CoThreads;
+  coProposals: CoProposalRecord[];
+  locks: LockMap;
+  view: Record<string, Record<string, number>>;
 };
+
+// Viewport/zoom preferences are stored per module and never touch revisions.
+export type ViewState = { x: number; y: number; scale: number; lod?: number };
 
 export function createBookWorkspace(book: BookProject): BookWorkspace {
   const idea = book.premise;
@@ -72,6 +80,10 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
     assetVersions: {},
     proposals: {},
     reviews: {},
+    threads: {},
+    coProposals: [],
+    locks: {},
+    view: {},
     plot: {
       instruction: `为《${book.title}》设计一条围绕核心冲突展开的支线，在中段与主线交汇，并在结局前回收。`,
       branches: [],
@@ -84,7 +96,16 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
   };
 }
 
-export function mergeBookWorkspace(book: BookProject, saved?: Partial<BookWorkspace>): BookWorkspace {
+// Input coming from storage, imports or the desktop bridge: content fields are
+// typed, while co-creation state arrives unvalidated and gets normalized below.
+export type SavedWorkspaceInput = Partial<Omit<BookWorkspace, "threads" | "coProposals" | "locks" | "view">> & {
+  threads?: unknown;
+  coProposals?: unknown;
+  locks?: unknown;
+  view?: unknown;
+};
+
+export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInput | null): BookWorkspace {
   const base = createBookWorkspace(book);
   if (!saved) return base;
   return {
@@ -96,6 +117,10 @@ export function mergeBookWorkspace(book: BookProject, saved?: Partial<BookWorksp
     assetVersions: saved.assetVersions ?? {},
     proposals: saved.proposals ?? {},
     reviews: saved.reviews ?? {},
+    threads: normalizeThreads(saved.threads),
+    coProposals: normalizeProposals(saved.coProposals).filter((proposal) => proposal.bookId === book.id),
+    locks: normalizeLocks(saved.locks),
+    view: normalizeView(saved.view),
     plot: { ...base.plot, ...saved.plot, branches: saved.plot?.branches ?? base.plot.branches },
     versions: saved.versions?.length ? saved.versions : base.versions,
   };
@@ -112,24 +137,40 @@ export function withSnapshot(workspace: BookWorkspace, label: string): BookWorks
   return { ...workspace, versions: [version, ...workspace.versions].slice(0, 30) };
 }
 
-export function changeAsset(workspace: BookWorkspace, type: string, content: string, saveVersion = false): BookWorkspace {
+export function changeAsset(workspace: BookWorkspace, type: string, content: string, saveVersion = false, label = "修改前快照"): BookWorkspace {
   const chapter = workspace.chapters.find((c) => c.id === workspace.activeChapterId) ?? workspace.chapters[0];
   const key = type === "chapters" ? `chapter:${chapter.id}` : type;
   const previous = type === "chapters" ? chapter.content : workspace.assets[type] ?? "";
   const history = workspace.assetVersions[key] ?? [];
-  const versions = saveVersion ? [{ id: crypto.randomUUID(), createdAt: new Date().toLocaleString("zh-CN"), label: "修改前快照", content: previous }, ...history].slice(0, 30) : history;
+  const versions = saveVersion ? [{ id: crypto.randomUUID(), createdAt: new Date().toLocaleString("zh-CN"), label, content: previous }, ...history].slice(0, 30) : history;
   return { ...workspace, assetVersions: { ...workspace.assetVersions, [key]: versions },
     ...(type === "chapters" ? { chapters: workspace.chapters.map((c) => c.id === chapter.id ? { ...c, content, updatedAt: new Date().toISOString() } : c) }
       : { assets: { ...workspace.assets, [type]: content } }),
   };
 }
 
+// Writes an adopted candidate into the exact chapter it was generated for, even
+// if the author has switched chapters meanwhile, and keeps a restorable snapshot.
+export function applyChapterText(workspace: BookWorkspace, chapterId: string, content: string, label: string): BookWorkspace {
+  const chapter = workspace.chapters.find((item) => item.id === chapterId);
+  if (!chapter) return workspace;
+  const key = `chapter:${chapterId}`;
+  const history = workspace.assetVersions[key] ?? [];
+  return {
+    ...workspace,
+    assetVersions: { ...workspace.assetVersions, [key]: [{ id: crypto.randomUUID(), createdAt: new Date().toLocaleString("zh-CN"), label, content: chapter.content }, ...history].slice(0, 30) },
+    chapters: workspace.chapters.map((item) => item.id === chapterId ? { ...item, content, updatedAt: new Date().toISOString() } : item),
+  };
+}
+
+const ASSET_LABELS: Record<string, string> = { world: "世界观", characters: "人物角色", timeline: "旧剧情笔记（冲突以已确认正文与当前世界线为准）", style: "文笔文风", outline: "卷章大纲", overview: "故事蓝图", chapters: "章节正文" };
+
 export function buildStoryContext(book: BookProject, workspace: BookWorkspace, active: string): string {
   const chapterIndex = Math.max(0, workspace.chapters.findIndex((c) => c.id === workspace.activeChapterId));
   const chapter = workspace.chapters[chapterIndex];
-  const assets = Object.entries(workspace.assets).filter(([key]) => key !== "chapters").map(([key, value]) => `【${key === "timeline" ? "旧剧情笔记（冲突以已确认正文与当前世界线为准）" : key}】\n${value.slice(0, 14000)}`);
+  const assets = Object.entries(workspace.assets).filter(([key]) => key !== "chapters").map(([key, value]) => `【${ASSET_LABELS[key] ?? key}】\n${value.slice(0, 14000)}`);
   return [
-    `书名：${book.title}\n类型：${book.genre}\n故事种子：${workspace.idea.slice(0, 12000)}\n创作偏好：${workspace.tags.join("、").slice(0, 2000)}\n当前工作区：${active}`,
+    `书名：${book.title}\n类型：${book.genre}\n故事种子：${workspace.idea.slice(0, 12000)}\n创作偏好：${workspace.tags.join("、").slice(0, 2000)}\n当前工作区：${ASSET_LABELS[active] ?? active}`,
     `【当前编辑内容】\n${active === "chapters" ? `${chapter.title}\n${chapter.content.slice(-24000)}` : workspace.assets[active]?.slice(0, 24000) ?? workspace.idea.slice(0, 12000)}`,
     worldlineContext(workspace, active),
     ...assets, `【主支线说明】\n${workspace.plot.summary ?? "尚未生成"}`,

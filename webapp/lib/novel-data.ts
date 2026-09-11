@@ -23,12 +23,19 @@ const plotSchema = z.object({ instruction: z.string(), branches: z.array(branchS
 export const chapterSchema = z.object({ id, title: z.string().min(1), content: z.string(), updatedAt: z.string(), plotEventIds: z.array(z.string().min(1)).max(80).optional() });
 const assetVersionSchema = z.object({ id, label: z.string(), createdAt: z.string(), content: z.string() });
 const storySchema = z.object({ idea: z.string(), tags: z.array(z.string()), references: z.array(referenceSchema), assets: z.record(z.string()), plot: plotSchema, chapters: z.array(chapterSchema), activeChapterId: z.string() });
+// Working state travels with the book but stays out of content snapshots and
+// revision counting. Entries are parsed tolerantly and normalized on load, so a
+// single damaged thread or draft never makes the whole book unreadable.
 export const workspaceSchema = storySchema.partial().extend({
   messages: z.array(z.object({ role: z.enum(["ai", "user"]), text: z.string() })).optional(),
   versions: z.array(z.object({ id, label: z.string(), createdAt: z.string(), idea: z.string(), snapshot: storySchema.optional() })).optional(),
   assetVersions: z.record(z.array(assetVersionSchema)).optional(),
   proposals: z.record(z.string()).optional(),
   reviews: z.record(z.string()).optional(),
+  threads: z.record(z.string(), z.unknown()).optional(),
+  coProposals: z.array(z.unknown()).max(400).optional(),
+  locks: z.record(z.string(), z.unknown()).optional(),
+  view: z.record(z.string(), z.unknown()).optional(),
 });
 const backupSchema = z.object({ version: z.union([z.literal(2), z.literal(3)]).optional(), books: z.array(bookSchema), workspaces: z.record(id, workspaceSchema).default({}) });
 
