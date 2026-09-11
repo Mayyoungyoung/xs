@@ -20,8 +20,16 @@ test("desktop library persists across restarts with atomic revisions and indepen
   const backup = (await readdir(path.join(directory, "backups")))[0];
   assert.equal(JSON.parse(await readFile(path.join(directory, "backups", backup), "utf8")).workspaces.local.assets.world, "保存到软件自己的目录");
   await restarted.saveKey(new Uint8Array([7, 2, 8, 3]));
-  await restarted.saveModel("deepseek-v4-pro");
-  assert.equal(await new DesktopStore(directory).readModel(), "deepseek-v4-pro");
+  await restarted.savePreferences({ provider: "anthropic", model: "claude-sonnet-4-5" });
+  assert.deepEqual(await new DesktopStore(directory).readPreferences(), { provider: "anthropic", model: "claude-sonnet-4-5" });
+  await restarted.savePreferences({ provider: "custom", model: "local-novel", baseUrl: "http://127.0.0.1:11434/v1" });
+  assert.deepEqual(await new DesktopStore(directory).readPreferences(), { provider: "custom", model: "local-novel", baseUrl: "http://127.0.0.1:11434/v1" });
+  await assert.rejects(restarted.savePreferences({ provider: "unknown-vendor", model: "x" }), /供应商/);
+  await assert.rejects(restarted.savePreferences({ provider: "deepseek", model: "bad model!" }), /模型名称/);
+  await assert.rejects(restarted.savePreferences({ provider: "custom", model: "x", baseUrl: "http://192.168.1.5/v1" }), /接口地址/);
+  assert.deepEqual(await new DesktopStore(directory).readPreferences(), { provider: "custom", model: "local-novel", baseUrl: "http://127.0.0.1:11434/v1" });
+  await writeFile(path.join(directory, "preferences.json"), JSON.stringify({ model: "deepseek-v4-pro" }));
+  assert.deepEqual(await new DesktopStore(directory).readPreferences(), { provider: "deepseek", model: "deepseek-v4-pro" });
   assert.ok(!(await readFile(restarted.libraryPath, "utf8")).includes("credentials"));
 });
 test("desktop invalid and corrupt files are never overwritten by a fallback library", async (t) => {

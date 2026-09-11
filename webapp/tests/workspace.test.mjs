@@ -127,9 +127,9 @@ test("empty books show zero, navigation is explicit, credentials stay out of boo
   const keyInput = document.querySelector('[aria-label="DeepSeek API Key"]');
   assert.equal(keyInput.type, "password");
   await fill(keyInput, key);
-  await click(buttons("保存密钥")[0]);
+  await click(buttons("验证并保存")[0]);
   assert.equal(keyInput.value, "");
-  assert.equal(sessionStorage.getItem("momai-deepseek-session-key"), key);
+  assert.deepEqual(JSON.parse(sessionStorage.getItem("momai-session-key")), { provider: "deepseek", key });
   await click(buttons("测试连接")[0]);
   assert.equal(sentHeaders.at(-1)["X-Momai-API-Key"], key);
   assert.equal(prompts.at(-1).context, undefined);
@@ -169,7 +169,7 @@ test("empty books show zero, navigation is explicit, credentials stay out of boo
   await act(async () => { const saved = await loadLibrary([]); assert.ok(!JSON.stringify(saved).includes(key)); assert.equal(saved.workspaces["chang-an"].plot.roadmap.lines.length, 3); assert.equal(saved.workspaces["chang-an"].plot.roadmap.events.length, 2); await pause(); });
   await click(buttons("模型设置")[0]);
   await click(buttons("清除密钥")[0]);
-  assert.equal(sessionStorage.getItem("momai-deepseek-session-key"), null);
+  assert.equal(sessionStorage.getItem("momai-session-key"), null);
   await act(async () => { root.unmount(); await pause(); });
   style.remove();
   await window.happyDOM.abort();
@@ -358,7 +358,7 @@ test("desktop settings select and migrate storage, report cancellation and prese
     changeDataFolder: async () => { if (outcome instanceof Error) throw outcome; return outcome; },
   };
   try {
-    await act(async () => { root.render(createElement(ModelSettings, { open: true, onOpenChange: () => {}, model: "deepseek-v4-flash", onModelChange: () => {}, hasSessionKey: false, connection: "未配置", onSaveKey: () => {}, onTest: async () => {} })); await pause(); });
+    await act(async () => { root.render(createElement(ModelSettings, { open: true, onOpenChange: () => {}, choice: { provider: "deepseek", model: "deepseek-v4-flash" }, onChoiceChange: () => {}, hasSessionKey: false, connection: "未配置", onSaveKey: () => {}, onTest: async () => {} })); await pause(); });
     await act(pause);
     assert.ok(document.body.textContent.includes("C:\\旧资料"));
     await click(buttons("更改位置并迁移")[0]);

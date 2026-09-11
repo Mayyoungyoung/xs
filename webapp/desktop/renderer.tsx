@@ -8,8 +8,8 @@ async function start() {
   const bridge = desktopBridge();
   if (!bridge) throw new Error("软件初始化失败，请重新打开墨脉。");
   const settings = await bridge.readSettings();
-  if (settings.apiKey) sessionStorage.setItem("momai-deepseek-session-key", settings.apiKey);
-  localStorage.setItem("momai-model", settings.model);
+  if (settings.apiKey) sessionStorage.setItem("momai-session-key", JSON.stringify({ provider: settings.provider, key: settings.apiKey }));
+  localStorage.setItem("momai-model-choice", JSON.stringify({ provider: settings.provider, model: settings.model, ...(settings.baseUrl ? { baseUrl: settings.baseUrl } : {}) }));
   const originalFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;

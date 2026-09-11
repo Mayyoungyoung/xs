@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile, open, rename, copyFile, readdir, unlink } f
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseBackup } from "../lib/novel-data";
+import { CUSTOM_PROVIDER_ID, DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID, defaultModelOf, normalizeBaseUrl, providerById, validModelName } from "../lib/model-providers";
 
 export async function atomicWrite(filename: string, content: string | Uint8Array) {
   await mkdir(path.dirname(filename), { recursive: true });
@@ -52,8 +53,33 @@ export class DesktopStore {
   }
   flush() { return this.queue; }
   async recovery() { return { description: "墨脉桌面版本地恢复数据", rawLibrary: await readFile(this.libraryPath, "utf8").catch(() => ""), dataPath: this.directory }; }
-  async readModel() { try { const value = JSON.parse(await readFile(path.join(this.directory, "preferences.json"), "utf8")); return value.model === "deepseek-v4-pro" ? value.model : "deepseek-v4-flash"; } catch { return "deepseek-v4-flash"; } }
-  async saveModel(model: string) { if (!["deepseek-v4-pro", "deepseek-v4-flash"].includes(model)) throw new Error("无效模型"); await atomicWrite(path.join(this.directory, "preferences.json"), JSON.stringify({ model })); }
+  async readPreferences() {
+    try {
+      const value = JSON.parse(await readFile(path.join(this.directory, "preferences.json"), "utf8"));
+      if (value && typeof value === "object") {
+        if (typeof value.provider === "string" && typeof value.model === "string") return this.normalizeChoice(value);
+        if (value.model === "deepseek-v4-pro" || value.model === "deepseek-v4-flash") return { provider: DEFAULT_PROVIDER_ID, model: value.model };
+      }
+    } catch { /* fall through to defaults */ }
+    return { provider: DEFAULT_PROVIDER_ID, model: DEFAULT_MODEL_ID };
+  }
+  private normalizeChoice(input: { provider?: unknown; model?: unknown; baseUrl?: unknown }) {
+    const provider = typeof input.provider === "string" && providerById(input.provider) ? input.provider : DEFAULT_PROVIDER_ID;
+    const model = typeof input.model === "string" && validModelName(input.model) ? input.model : defaultModelOf(provider);
+    const baseUrl = typeof input.baseUrl === "string" ? normalizeBaseUrl(input.baseUrl) : null;
+    return { provider, model, ...(provider === CUSTOM_PROVIDER_ID && baseUrl ? { baseUrl } : {}) };
+  }
+  async savePreferences(input: unknown) {
+    if (!input || typeof input !== "object" || typeof (input as { model?: unknown }).model !== "string") throw new Error("无效的模型设置");
+    const candidate = input as { provider?: unknown; model?: unknown; baseUrl?: unknown };
+    if (typeof candidate.provider !== "string" || !providerById(candidate.provider)) throw new Error("不支持的模型供应商");
+    if (typeof candidate.model !== "string" || !validModelName(candidate.model)) throw new Error("模型名称格式不正确");
+    if (candidate.baseUrl !== undefined && typeof candidate.baseUrl !== "string") throw new Error("接口地址无效");
+    if (typeof candidate.baseUrl === "string" && candidate.baseUrl && !normalizeBaseUrl(candidate.baseUrl)) throw new Error("接口地址无效：需填写 https 地址，或本机 http 地址");
+    const normalized = this.normalizeChoice(candidate);
+    if (normalized.provider === CUSTOM_PROVIDER_ID && !normalized.baseUrl) throw new Error("自定义接口需要填写接口地址");
+    await atomicWrite(path.join(this.directory, "preferences.json"), JSON.stringify(normalized));
+  }
   async readKey() { try { return await readFile(path.join(this.directory, "credentials.bin")); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; } }
   async saveKey(data: Uint8Array | null) { if (data) await atomicWrite(path.join(this.directory, "credentials.bin"), data); else await unlink(path.join(this.directory, "credentials.bin")).catch((error) => { if (error.code !== "ENOENT") throw error; }); }
   async writeNote() { await mkdir(this.directory, { recursive: true }); await writeFile(path.join(this.directory, "说明.txt"), "墨脉桌面版数据目录\n\nlibrary.json：全部小说、章节、世界线与版本记录。\nbackups：自动保留的最近 20 份完整书架备份，可在软件中导入。\ncredentials.bin：Windows 加密的模型密钥，与小说备份分开保存。\n\n请在软件关闭后复制整个文件夹以进行额外备份。不要在软件运行时手动改写 library.json。\n", "utf8"); }

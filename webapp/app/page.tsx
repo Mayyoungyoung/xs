@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
+import { NativeSelect, NativeSelectOptGroup, NativeSelectOption } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { WorldlineWorkbench } from "@/components/novel/worldline-workbench";
 import { ReferenceWorkbench } from "@/components/novel/reference-workbench";
@@ -24,7 +24,8 @@ import { loadLibrary, normalizeLibrary, readRecoveryData, saveLibrary } from "@/
 import { ModelSettings } from "@/components/novel/model-settings";
 import { desktopBridge } from "@/lib/desktop-bridge";
 import { writingGuidance } from "@/lib/writing-guidance";
-import { readSessionKey, saveSessionKey } from "@/lib/model-credentials";
+import { defaultChoice, readModelChoice, readSessionCredentials, saveModelChoice, saveSessionCredentials, type ModelChoice, type SessionCredentials } from "@/lib/model-credentials";
+import { CUSTOM_PROVIDER_ID, DEFAULT_PROVIDER_ID, PROVIDERS, providerById, shortModelLabel, validModelName } from "@/lib/model-providers";
 
 const navGroups = [
   { label: "故事设计", items: [
@@ -52,7 +53,7 @@ export default function Home() {
   const [generating, setGenerating] = useState(false);
   const [toast, setToast] = useState("");
   const [rightOpen, setRightOpen] = useState(false);
-  const [model, setModel] = useState("deepseek-v4-flash");
+  const [choice, setChoice] = useState<ModelChoice>(defaultChoice());
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [referenceScope, setReferenceScope] = useState<ReferenceScope>("plot");
   const [aiError, setAiError] = useState("");
@@ -61,7 +62,7 @@ export default function Home() {
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [storageError, setStorageError] = useState("");
   const [saveState, setSaveState] = useState("正在读取…");
-  const [apiKey, setApiKey] = useState("");
+  const [credentials, setCredentials] = useState<SessionCredentials | null>(null);
   const [serverConfigured, setServerConfigured] = useState(false);
   const [connection, setConnection] = useState("正在检查模型配置…");
   const revision = useRef(0);
@@ -137,13 +138,12 @@ export default function Home() {
       revision.current = loaded.revision;
       setBooks(loaded.books); setWorkspaces(loaded.workspaces); setHydrated(true);
       if (window.matchMedia("(max-width: 1180px)").matches) setRightOpen(false);
-      const savedKey = readSessionKey();
-      setApiKey(savedKey);
-      const savedModel = localStorage.getItem("momai-model");
-      if (savedModel === "deepseek-v4-pro" || savedModel === "deepseek-v4-flash") setModel(savedModel);
+      setCredentials(readSessionCredentials());
+      const savedChoice = readModelChoice();
+      if (savedChoice) setChoice(savedChoice);
     }).catch((error) => { if (alive) { setStorageError(`读取失败，原始数据未覆盖。${error instanceof Error ? error.message : "请检查存储权限。"}`); setSaveState("读取失败"); } });
-    fetch("/api/generate").then((r) => { if (!r.ok) throw new Error(); return r.json() as Promise<{ configured: boolean; model: string }>; }).then((data) => {
-      if (alive) { setServerConfigured(data.configured); setConnection(readSessionKey() || data.configured ? "已配置 · 待测试连接" : "未配置模型密钥"); if (!localStorage.getItem("momai-model")) setModel(data.model); }
+    fetch("/api/generate").then((r) => { if (!r.ok) throw new Error(); return r.json() as Promise<{ configured: boolean; provider?: string; model: string }>; }).then((data) => {
+      if (alive) { setServerConfigured(data.configured); setConnection(readSessionCredentials() || data.configured ? "已配置 · 待测试连接" : "未配置模型密钥"); if (!readModelChoice()) { const provider = typeof data.provider === "string" && providerById(data.provider) ? data.provider : DEFAULT_PROVIDER_ID; if (validModelName(data.model)) setChoice({ provider, model: data.model }); } }
     }).catch(() => { if (alive) setConnection("无法获取模型配置"); });
     return () => { alive = false; requestController.current?.abort(); };
   }, []);
@@ -228,8 +228,8 @@ export default function Home() {
     setAiError(""); setGenerating(true);
     try {
       const response = await fetch("/api/generate", {
-        method: "POST", headers: { "Content-Type": "application/json", ...(apiKey ? { "X-Momai-API-Key": apiKey } : {}) },
-        body: JSON.stringify({ task, prompt, model, context: [options?.context?.slice(0, 60000), buildStoryContext(currentBook, workspace, active).slice(0, options?.context ? 59000 : 120000)].filter(Boolean).join("\n\n"),
+        method: "POST", headers: { "Content-Type": "application/json", ...(credentials ? { "X-Momai-API-Key": credentials.key } : {}) },
+        body: JSON.stringify({ task, prompt, provider: choice.provider, model: choice.model, ...(choice.provider === CUSTOM_PROVIDER_ID && choice.baseUrl ? { baseUrl: choice.baseUrl } : {}), context: [options?.context?.slice(0, 60000), buildStoryContext(currentBook, workspace, active).slice(0, options?.context ? 59000 : 120000)].filter(Boolean).join("\n\n"),
           messages: (options?.messages ?? messages).slice(-20).map((m) => ({ ...m, text: m.text.slice(-12000) })),
           references: references.slice(-12).map((r) => ({ title: r.title.slice(0, 500), kind: r.kind.slice(0, 100), summary: r.summary.slice(0, 12000) })),
         }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(190000)]),
@@ -301,25 +301,33 @@ export default function Home() {
     notify("已采纳到当前编辑器，并保留修改前快照");
   }
 
-  function changeModel(value: string) {
-    setModel(value);
-    void desktopBridge()?.saveModel(value).catch(() => notify("模型偏好保存失败，下次打开请重新选择"));
-    try { localStorage.setItem("momai-model", value); } catch { notify("模型选择仅在本次使用中生效"); }
+  function applyChoice(next: ModelChoice) {
+    setChoice(next);
+    void desktopBridge()?.saveModel(next).catch(() => notify("模型偏好保存失败，下次打开请重新选择"));
+    if (!saveModelChoice(next)) notify("模型选择仅在本次使用中生效");
   }
-  async function testConnection(draftKey?: string) {
-    const key = draftKey || apiKey;
+  function changeModel(value: string) {
+    const separator = value.indexOf(":");
+    if (separator < 1) return;
+    const provider = providerById(value.slice(0, separator)) ? value.slice(0, separator) : choice.provider;
+    const model = value.slice(separator + 1);
+    if (!validModelName(model)) return;
+    applyChoice({ provider, model, ...(provider === CUSTOM_PROVIDER_ID && choice.baseUrl ? { baseUrl: choice.baseUrl } : {}) });
+  }
+  async function testConnection(draftKey: string | undefined, target: ModelChoice) {
+    const key = draftKey || credentials?.key;
     try {
-      const response = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { "X-Momai-API-Key": key } : {}) }, body: JSON.stringify({ model, task: "chat", prompt: "连接测试，请只回复：连接成功。" }), signal: AbortSignal.timeout(45000) });
+      const response = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json", ...(key ? { "X-Momai-API-Key": key } : {}) }, body: JSON.stringify({ model: target.model, provider: target.provider, ...(target.provider === CUSTOM_PROVIDER_ID && target.baseUrl ? { baseUrl: target.baseUrl } : {}), task: "chat", prompt: "连接测试，请只回复：连接成功。" }), signal: AbortSignal.timeout(45000) });
       const data = await response.json() as { content?: string; error?: string };
       if (!response.ok || !data.content) throw new Error(data.error ?? "模型没有返回有效内容。");
-      if (!draftKey || draftKey === apiKey) setConnection("模型连接正常");
+      if (!draftKey || draftKey === credentials?.key) setConnection("模型连接正常");
     } catch (reason) {
       if (!draftKey) setConnection("连接失败，请检查密钥与账户状态");
       throw new Error(reason instanceof Error && reason.name === "TimeoutError" ? "连接超时，请稍后重试。" : reason instanceof Error ? reason.message : "暂时无法连接模型。");
     }
   }
   function backToShelf() { setScreen("shelf"); setSettingsOpen(false); }
-  const settingsDialog = <ModelSettings open={settingsOpen} onOpenChange={setSettingsOpen} model={model} onModelChange={changeModel} hasSessionKey={Boolean(apiKey)} connection={connection} onSaveKey={async (key) => { await desktopBridge()?.saveKey(key); saveSessionKey(key); setApiKey(key); setConnection(key || serverConfigured ? "已配置 · 待测试连接" : "未配置模型密钥"); }} onTest={testConnection} bookTitle={screen === "studio" ? currentBook.title : undefined} onRename={() => { setSettingsOpen(false); setTextPrompt({ kind: "rename", value: currentBook.title }); }} />;
+  const settingsDialog = <ModelSettings open={settingsOpen} onOpenChange={setSettingsOpen} choice={choice} onChoiceChange={applyChoice} hasSessionKey={Boolean(credentials)} connection={connection} onSaveKey={async (key, target) => { await desktopBridge()?.saveKey(key); const next = key ? { provider: target.provider, key } : null; saveSessionCredentials(next); setCredentials(next); setConnection(key || serverConfigured ? "已配置 · 待测试连接" : "未配置模型密钥"); }} onTest={testConnection} bookTitle={screen === "studio" ? currentBook.title : undefined} onRename={() => { setSettingsOpen(false); setTextPrompt({ kind: "rename", value: currentBook.title }); }} />;
 
   const storageBanner = storageError && <div className="storage-banner" role="alert">{storageError}<Button variant="outline" onClick={() => { if (hydrated) exportBookshelf(displayedBooks, workspaces); else void readRecoveryData().then((data) => downloadText(JSON.stringify(data, null, 2), "墨脉原始数据恢复包.json", "application/json")).catch(() => setStorageError("无法读取原始存储，请保留浏览器数据并检查存储权限。")); }}>{hydrated ? "导出当前备份" : "导出原始数据"}</Button><Button variant="outline" onClick={() => window.location.reload()}>重新载入</Button></div>;
   if (!hydrated) return <main className="shelf-shell"><div className="shelf-content"><h1>墨脉 · AI 小说工作台</h1><p>{storageError ? "原始数据仍保留在浏览器中。请勿清除网站数据。" : "正在读取你的书架…"}</p>{storageBanner}</div></main>;
@@ -351,9 +359,11 @@ export default function Home() {
         <Button className="back-to-shelf" variant="outline" onClick={backToShelf}><ArrowLeft />返回书架</Button>
         <div className="current-book-heading"><span className="book-dot">{currentBook.glyph}</span><div><strong>{currentBook.title}</strong><small>{currentBook.genre}</small></div></div>
         <div className="top-actions">
-          <div className="model-picker"><Cpu size={15} /><NativeSelect value={model} onChange={(event) => changeModel(event.target.value)} size="sm" aria-label="生成模型">
-            <NativeSelectOption value="deepseek-v4-flash">DeepSeek V4 Flash</NativeSelectOption>
-            <NativeSelectOption value="deepseek-v4-pro">DeepSeek V4 Pro</NativeSelectOption>
+          <div className="model-picker"><Cpu size={15} /><NativeSelect value={`${choice.provider}:${choice.model}`} onChange={(event) => changeModel(event.target.value)} size="sm" aria-label="生成模型">
+            {PROVIDERS.filter((provider) => provider.id !== CUSTOM_PROVIDER_ID || choice.provider === CUSTOM_PROVIDER_ID).map((provider) => <NativeSelectOptGroup key={provider.id} label={provider.label}>
+              {provider.models.map((model) => <NativeSelectOption key={model.id} value={`${provider.id}:${model.id}`}>{model.label}</NativeSelectOption>)}
+              {provider.id === choice.provider && !provider.models.some((model) => model.id === choice.model) && <NativeSelectOption value={`${provider.id}:${choice.model}`}>{choice.model} · 自定义</NativeSelectOption>}
+            </NativeSelectOptGroup>)}
           </NativeSelect></div>
           <button className="icon-button" aria-label="搜索" onClick={() => setSearchOpen(true)}><Search size={18} /></button>
           <Button variant="outline" className="open-model-settings" onClick={() => setSettingsOpen(true)}><Settings2 size={16} />模型设置</Button>
@@ -400,7 +410,7 @@ export default function Home() {
 
         {assistantVisible && <aside className="copilot" aria-label="共创助手">
           <div className="copilot-head"><div><span className="ai-orb"><Sparkles size={16} /></span><strong>共创助手</strong><i title={connection}>{connection === "模型连接正常" ? "已连接" : "待连接"}</i></div><button aria-label="收起助手" onClick={() => setRightOpen(false)}><PanelRightClose size={18} /></button></div>
-          <div className="context-strip"><span>正在讨论</span><strong>{currentLabel}</strong><em>{model === "deepseek-v4-flash" ? "V4 Flash" : "V4 Pro"}</em><button disabled={generating} onClick={() => { if (window.confirm("清空本书对话？设定和正文不会删除。")) updateMessages([]); }}>清空</button></div>
+          <div className="context-strip"><span>正在讨论</span><strong>{currentLabel}</strong><em>{shortModelLabel(choice.provider, choice.model)}</em><button disabled={generating} onClick={() => { if (window.confirm("清空本书对话？设定和正文不会删除。")) updateMessages([]); }}>清空</button></div>
           <div className="messages"><div className="day-divider"><span>今天</span></div>
             {messages.length === 0 && <div className="empty-chat">从一句模糊的想法开始就好。<br />我会帮你把它变成可写的故事。</div>}
             {messages.map((message, index) => <div className={`message ${message.role}`} key={`${message.text}-${index}`}>{message.role === "ai" && <div className="mini-orb"><Sparkles size={13} /></div>}<div className="message-bubble">{message.text}</div></div>)}

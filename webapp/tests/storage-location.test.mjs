@@ -16,7 +16,7 @@ async function prepare(t) {
 }
 test("storage relocation preserves backups and credentials, queues new edits and survives restart", async (t) => {
   const { manager, target } = await prepare(t); const original = manager.directory;
-  await manager.run(async (store) => { await store.save(library, 1); await store.saveKey(new Uint8Array([11, 22, 33])); await store.saveModel("deepseek-v4-pro"); });
+  await manager.run(async (store) => { await store.save(library, 1); await store.saveKey(new Uint8Array([11, 22, 33])); await store.savePreferences({ provider: "deepseek", model: "deepseek-v4-pro" }); });
   const changed = structuredClone(library); changed.workspaces.move.assets.world = "迁移中的新编辑";
   const migrating = manager.migrate(target);
   const saving = manager.run((store) => store.save(changed, 2));
@@ -26,7 +26,7 @@ test("storage relocation preserves backups and credentials, queues new edits and
   assert.equal(restarted.directory, target);
   await restarted.run(async (store) => {
     assert.equal((await store.read()).workspaces.move.assets.world, "迁移中的新编辑");
-    assert.deepEqual([...await store.readKey()], [11, 22, 33]); assert.equal(await store.readModel(), "deepseek-v4-pro");
+    assert.deepEqual([...await store.readKey()], [11, 22, 33]); assert.deepEqual(await store.readPreferences(), { provider: "deepseek", model: "deepseek-v4-pro" });
   });
   assert.ok((await readdir(path.join(target, "backups"))).length);
 });

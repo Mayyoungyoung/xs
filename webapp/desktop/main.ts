@@ -31,9 +31,9 @@ async function saveKey(key: string) {
 handle("library:read", () => storage.run((store) => store.read()));
 handle("library:save", (library: unknown, revision: number) => storage.run((store) => store.save(library, revision)));
 handle("library:recovery", () => storage.run((store) => store.recovery()));
-handle("settings:read", async () => ({ apiKey: await readKey(), model: await storage.run((store) => store.readModel()) }));
+handle("settings:read", async () => ({ apiKey: await readKey(), ...await storage.run((store) => store.readPreferences()) }));
 handle("settings:key", saveKey);
-handle("settings:model", (model: string) => storage.run((store) => store.saveModel(model)));
+handle("settings:model", (choice: unknown) => storage.run((store) => store.savePreferences(choice)));
 handle("app:info", () => ({ dataPath: storage.directory }));
 handle("app:open-data", async () => { const failure = await shell.openPath(storage.directory); if (failure) throw new Error("无法打开数据文件夹"); });
 let selectingStorage = false;
@@ -63,6 +63,9 @@ const types: Record<string, string> = { ".html": "text/html; charset=utf-8", ".j
 const server = createServer(async (request, response) => {
   try {
     if (request.method !== "GET") { response.writeHead(405).end(); return; }
+    // Only this app's own window may talk to the loopback server.
+    const hostname = (request.headers.host ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase();
+    if (!["localhost", "127.0.0.1", "::1"].includes(hostname)) { response.writeHead(403).end(); return; }
     const url = new URL(request.url ?? "/", "http://localhost");
     const name = decodeURIComponent(url.pathname) === "/" ? "index.html" : decodeURIComponent(url.pathname).slice(1);
     const filename = path.resolve(root, name);
