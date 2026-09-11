@@ -19,6 +19,7 @@ export const TASK_PROMPTS: Record<string, string> = {
   character_design: "设计有欲望、恐惧、误信念、秘密、关系、弧光和知识边界的原创人物。保持现有角色一致，只输出人物设定。",
   style_fingerprint: "把参考材料转化为句式、节奏、视角、意象密度、对话比例和禁忌清单。只输出可执行文风指南。",
   reference_analysis: "只根据提供的简介、元数据或用户材料提取可迁移结构、人物功能、文风参数。不要伪造不存在的内容。",
+  roadmap_edit: '你是小说剧情结构编辑。按作者要求对世界线做最小必要修改，只输出 JSON 对象：{"ops":[{"op":"updateEvent","eventId":"e2","fields":{"note":"事件、选择与后果","chapter":"4-8","order":2,"status":"planned"}},{"op":"addEvent","event":{"id":"e9","title":"新事件","note":"发生什么","chapter":"9-12","order":3},"lineIds":["main-a"]},{"op":"linkEvent","lineId":"branch-a","eventId":"e2"},{"op":"updateLine","lineId":"main-a","fields":{"goal":"这条线要达成的目标"}}]}。规则：只允许这四种操作；事件与故事线必须使用上下文中已有的 ID，禁止修改或重建任何 id，禁止重排全图；可修改字段仅限 title（≤80字）、note（≤800字）、chapter（≤40字）、order（数字）、status（planned/active/done）与故事线的 title、goal；新增事件必须给出已有故事线的 lineIds，并自行给出不重复的新 event.id；作者没有明确要求时不要把事件标为 done，也不要把后续计划写成已发生；只改作者点名的部分，其余内容保持原样；一次最多 40 条操作；确实不需要修改时输出 {"ops":[]}；不要输出 JSON 以外的任何文字。',
 };
 const bodySchema = z.object({
   task: z.string().refine((task) => Object.hasOwn(TASK_PROMPTS, task)).default("chat"),
@@ -158,7 +159,7 @@ export async function POST(request: Request) {
       messages: [...body.messages.map((m) => ({ role: m.role === "ai" ? "assistant" as const : "user" as const, content: m.text })), { role: "user" as const, content: body.prompt }],
       temperature: body.task === "continuity_review" ? .3 : .8,
       maxTokens: 12000,
-      jsonMode: body.task === "plot_update",
+      jsonMode: body.task === "plot_update" || body.task === "roadmap_edit",
     });
     const response = await fetch(upstream.url, { method: "POST", headers: upstream.headers, body: JSON.stringify(upstream.body), signal: AbortSignal.any([request.signal, AbortSignal.timeout(180000)]) });
     if (!response.ok) {

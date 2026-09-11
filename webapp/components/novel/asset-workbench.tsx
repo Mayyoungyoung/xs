@@ -1,28 +1,30 @@
 "use client";
 
-import { useState } from "react";
-import { BookMarked, BookOpen, Box, Check, CircleUserRound, Clock3, Download, Feather, GitCommit, Library, LoaderCircle, Plus, Save, Sparkles, Trash2 } from "lucide-react";
+import { useRef, useState } from "react";
+import { BookMarked, BookOpen, Box, Check, CircleUserRound, Clock3, Download, Feather, Library, LoaderCircle, Plus, Save, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
-import { withSnapshot, type BookWorkspace } from "./book-workspace";
+import { applyChapterText, changeAsset, withSnapshot, type BookWorkspace, type PlotGenerationOptions } from "./book-workspace";
 import { writingGuidance } from "@/lib/writing-guidance";
 import { downloadText, wordCount } from "@/lib/novel-data";
 import type { BookProject } from "./bookshelf";
 import type { ReferenceItem, ReferenceScope } from "./reference-library-dialog";
 import { ChapterRoadmap } from "./chapter-roadmap";
 import { chapterPlan } from "@/lib/story-roadmap";
+import { anchorFromRange, type CoModuleId, type CoTarget, type TextAnchor } from "@/lib/co-creation";
+import { CoCreationPanel } from "./co-creation-panel";
 
 type Props = {
   embedded?: boolean;
   book: BookProject; type: string; workspace: BookWorkspace; busy: boolean; saveState: string;
-  initialProposal?: string; onProposalConsumed: () => void;
   references: ReferenceItem[];
   onContentChange: (content: string, snapshot?: boolean) => void;
   onWorkspaceChange: (patch: Partial<BookWorkspace> | ((w: BookWorkspace) => BookWorkspace)) => void;
   onOpenReferences: (scope: ReferenceScope) => void;
   onRemoveReference: (reference: ReferenceItem) => void;
-  onGenerate: (prompt: string, task: string) => Promise<string>;
+  onGenerate: (prompt: string, task: string, options?: PlotGenerationOptions) => Promise<string>;
+  onCancel: () => void;
   onNotify: (message: string) => void;
 };
 type LocalDirectoryHandle = {
@@ -36,45 +38,64 @@ const configs: Record<string, { title: string; desc: string; icon: typeof Box; s
   outline: { title: "卷章大纲", desc: "把主支线落实为章节冲突、转折与钩子。", icon: Library, scope: "plot", task: "outline_design" },
   chapters: { title: "章节正文", desc: "按章节写作，参考设定和前文，预览后采纳生成内容。", icon: BookOpen, scope: "plot", task: "chapter_write" },
 };
-export function AssetWorkbench({ embedded = false, book, type, workspace, busy, saveState, initialProposal = "", onProposalConsumed, references, onContentChange, onWorkspaceChange, onOpenReferences, onRemoveReference, onGenerate, onNotify }: Props) {
+export function AssetWorkbench({ embedded = false, book, type, workspace, busy, saveState, references, onContentChange, onWorkspaceChange, onOpenReferences, onRemoveReference, onGenerate, onCancel, onNotify }: Props) {
   const config = configs[type] ?? configs.world;
   const Icon = config.icon;
   const [savingLocal, setSavingLocal] = useState(false);
-  const guidance = writingGuidance(type, book, workspace);
-  const [customRequest, setRequest] = useState<string | null>(null);
-  const request = customRequest ?? guidance.request;
   const [error, setError] = useState("");
+  const [selection, setSelection] = useState<TextAnchor | null>(null);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
+  const guidance = writingGuidance(type, book, workspace);
   const chapter = workspace.chapters.find((c) => c.id === workspace.activeChapterId) ?? workspace.chapters[0];
   const editorContent = type === "chapters" ? chapter.content : workspace.assets[type] ?? "";
   const versionKey = type === "chapters" ? `chapter:${chapter.id}` : type;
-  const proposedContent = workspace.proposals[versionKey] ?? initialProposal;
   const review = workspace.reviews[versionKey] ?? "";
-  function setProposal(content: string) { onWorkspaceChange((w) => ({ ...w, proposals: { ...w.proposals, [versionKey]: content } })); }
+  const target: CoTarget = { moduleId: type as CoModuleId, ...(type === "chapters" ? { entityId: chapter.id } : {}) };
   function setReview(content: string) { onWorkspaceChange((w) => ({ ...w, reviews: { ...w.reviews, [versionKey]: content } })); }
   const versions = workspace.assetVersions[versionKey] ?? [];
   const scopedReferences = references.filter((item) => item.scope === config.scope);
 
-  async function generate(task = config.task, prompt = request) {
-    if (!prompt.trim() || busy) return;
-    setError("");
+  function captureSelection(event: React.SyntheticEvent<HTMLTextAreaElement>) {
+    const field = event.currentTarget;
+    setSelection(anchorFromRange(field.value, field.selectionStart ?? 0, field.selectionEnd ?? 0));
+  }
+
+  // Chapter generation still binds the recommended events before asking, and
+  // every AI request goes through the shared co-creation panel.
+  async function generate(prompt: string, task: string, options?: PlotGenerationOptions) {
     if (type === "chapters") {
       const plan = chapterPlan(workspace);
-      if (plan.missing.length) { setError("本章绑定的事件已不存在，请重新选择推进事件。"); return; }
+      if (plan.missing.length) throw new Error("本章绑定的事件已不存在，请重新选择推进事件。");
       if (plan.roadmap.lines.length && !plan.manual) onWorkspaceChange((current) => ({ ...current, chapters: current.chapters.map((item) => item.id === chapter.id ? { ...item, plotEventIds: plan.ids } : item) }));
     }
+    return onGenerate(prompt, task, options);
+  }
+
+  async function reviewChapter() {
+    if (!editorContent.trim() || busy) return;
+    setError("");
     try {
-      const result = await onGenerate(prompt, task);
-      if (task === "continuity_review") setReview(result); else setProposal(result);
-      onNotify(task === "continuity_review" ? "审查完成，正文保持原样" : "已生成，请预览后替换或追加");
+      const result = await onGenerate("结合本书设定与前文审查当前章节，给出具体位置及修改建议。", "continuity_review");
+      setReview(result);
+      onNotify("审查完成，正文保持原样");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "生成失败，请重试。"); }
   }
-  function applyProposal(append = false) {
-    onContentChange(append ? [editorContent, proposedContent].filter(Boolean).join("\n\n") : proposedContent, true);
-    setProposal(""); onProposalConsumed(); onNotify("已采纳，修改前内容可在版本记录恢复");
+
+  // One restorable snapshot per adoption, written to the proposal's own target
+  // (so a late response never lands in a chapter the author switched to).
+  function applyTargetText(applyTo: CoTarget, content: string, label: string) {
+    if (applyTo.moduleId === "chapters" && !workspace.chapters.some((item) => item.id === applyTo.entityId)) { onNotify("目标章节已不存在，候选稿未写入"); return; }
+    onWorkspaceChange((current) => {
+      if (applyTo.moduleId === "chapters") return applyChapterText(current, applyTo.entityId!, content, label);
+      if (applyTo.moduleId === "overview") return { ...withSnapshot(current, label), idea: content };
+      return changeAsset(current, applyTo.moduleId, content, true, label);
+    });
   }
+
   function addChapter() {
     const next = { id: crypto.randomUUID(), title: `第 ${workspace.chapters.length + 1} 章`, content: "", updatedAt: new Date().toISOString() };
     onWorkspaceChange((w) => ({ ...w, chapters: [...w.chapters, next], activeChapterId: next.id }));
+    setSelection(null);
   }
   function deleteChapter() {
     if (!window.confirm(`删除“${chapter.title}”？删除前会保留完整故事快照。`)) return;
@@ -100,7 +121,7 @@ export function AssetWorkbench({ embedded = false, book, type, workspace, busy, 
   return <div className="asset-workbench">
     <div className={embedded ? "worldline-view-heading asset-heading" : "page-heading asset-heading"}><div>{!embedded && <div className="eyebrow">{book.title} / {config.title}</div>}{embedded ? <h2>{config.title}</h2> : <h1>{config.title}</h1>}<p>{config.desc}</p></div><div className="heading-actions"><Button variant="outline" onClick={() => void saveToDirectory()} disabled={savingLocal}>{savingLocal ? <LoaderCircle className="spin" /> : <Download />}导出文件</Button></div></div>
     {type === "chapters" && <section className="chapter-toolbar">
-      <NativeSelect aria-label="当前章节" disabled={busy} value={chapter.id} onChange={(e) => onWorkspaceChange({ activeChapterId: e.target.value })}>{workspace.chapters.map((c) => <NativeSelectOption value={c.id} key={c.id}>{c.title} · {wordCount(c.content)} 字</NativeSelectOption>)}</NativeSelect>
+      <NativeSelect aria-label="当前章节" disabled={busy} value={chapter.id} onChange={(e) => { onWorkspaceChange({ activeChapterId: e.target.value }); setSelection(null); }}>{workspace.chapters.map((c) => <NativeSelectOption value={c.id} key={c.id}>{c.title} · {wordCount(c.content)} 字</NativeSelectOption>)}</NativeSelect>
       <input aria-label="章节标题" value={chapter.title} onChange={(e) => { const title = e.target.value; onWorkspaceChange((w) => ({ ...w, chapters: w.chapters.map((c) => c.id === chapter.id ? { ...c, title: title || "未命名章节" } : c) })); }} />
       <Button variant="outline" disabled={busy} onClick={addChapter}><Plus />新章节</Button>
       <Button variant="outline" disabled={busy || workspace.chapters.length < 2} onClick={deleteChapter}><Trash2 />删除本章</Button>
@@ -109,18 +130,32 @@ export function AssetWorkbench({ embedded = false, book, type, workspace, busy, 
     {type === "chapters" && <ChapterRoadmap workspace={workspace} busy={busy} onChange={onWorkspaceChange} />}
     <section className="asset-layout"><div>
       <div className="asset-editor"><div className="asset-editor-head"><span><Icon />{type === "chapters" ? chapter.title : "当前内容"}</span><Button size="sm" variant="outline" onClick={() => { onContentChange(editorContent, true); onNotify("已创建当前内容快照"); }}><Save />保存快照</Button></div>
-        <Textarea value={editorContent} placeholder={guidance.placeholder} onChange={(event) => onContentChange(event.target.value)} aria-label={`${config.title}编辑器`} />
+        <Textarea ref={editorRef} value={editorContent} placeholder={guidance.placeholder} onChange={(event) => { onContentChange(event.target.value); setSelection(null); }} onSelect={captureSelection} onBlur={captureSelection} aria-label={`${config.title}编辑器`} />
         <footer><span><Check />{saveState}</span><span>{wordCount(editorContent).toLocaleString()} 字</span></footer>
       </div>
       {error && <p className="ai-error" role="alert">{error}</p>}
-      {proposedContent && <section className="generation-preview"><header><h2>生成预览</h2><span>采纳前不会修改当前稿件</span></header><Textarea aria-label="生成结果预览" value={proposedContent} onChange={(e) => setProposal(e.target.value)} /><div><Button disabled={busy} onClick={() => applyProposal()}>替换当前内容</Button><Button disabled={busy} variant="outline" onClick={() => applyProposal(true)}>追加到末尾</Button><Button variant="ghost" onClick={() => { setProposal(""); onProposalConsumed(); }}>放弃本次结果</Button></div></section>}
+      {type === "chapters" && <div className="chapter-ai-actions"><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void generate("润色当前完整章节，保留剧情事实，只输出完整正文。", "chapter_polish")}>润色本章</Button><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void reviewChapter()}>连续性检查</Button></div>}
       {review && <section className="generation-preview"><h2>连续性审查</h2><div className="review-text">{review}</div><Button variant="outline" onClick={() => downloadText(review, `${book.title}-${chapter.title}-审查.md`)}>导出审查</Button></section>}
     </div><aside className="asset-side">
-      <section className="asset-ai-card"><header><span><Sparkles /></span><div><strong>与 AI 一起修改</strong><p>模型会参考本书设定与前文</p></div></header><Textarea aria-label="本页生成要求" value={request} onChange={(e) => setRequest(e.target.value)} /><Button onClick={() => void generate()} disabled={busy || !request.trim()}>{busy ? <LoaderCircle className="spin" /> : <Sparkles />}生成预览</Button>
-        {type === "chapters" && <div className="chapter-ai-actions"><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void generate("chapter_polish", "润色当前完整章节，保留剧情事实，只输出完整正文。")}>润色本章</Button><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void generate("continuity_review", "结合本书设定与前文审查当前章节，给出具体位置及修改建议。")}>连续性检查</Button></div>}
-      </section>
+      <CoCreationPanel
+        bookId={book.id}
+        workspace={workspace}
+        target={target}
+        busy={busy}
+        connection={saveState}
+        selection={selection}
+        onWorkspaceChange={onWorkspaceChange}
+        onGenerate={generate}
+        onApplyText={applyTargetText}
+        onApplyRoadmap={() => onNotify("剧情修改请在世界线中采纳")}
+        onCancel={onCancel}
+        onNotify={onNotify}
+        onOpenReferences={onOpenReferences}
+        onRemoveReference={onRemoveReference}
+        onFocusEditor={() => editorRef.current?.focus()}
+      />
       <section className="asset-reference-card"><header><strong>本页借鉴</strong><button onClick={() => onOpenReferences(config.scope)}><Plus />添加</button></header>{scopedReferences.length === 0 ? <div className="asset-no-reference"><BookMarked /><p>尚未选择借鉴资料</p></div> : scopedReferences.map((item) => <div className="asset-reference-row" key={`${item.id}-${item.scope}`}><div><strong>{item.title}</strong><small>{item.source}</small></div><button className="remove-reference" onClick={() => onRemoveReference(item)} aria-label={`删除借鉴 ${item.title}`}><Trash2 /></button></div>)}</section>
-      <section className="asset-version-card"><strong>版本记录 · 最近 30 次</strong>{versions.length === 0 && <p>保存快照或采纳生成内容后，可在此恢复。</p>}{versions.map((version) => <div key={version.id}><GitCommit /><span>{version.label}<small>{version.createdAt}</small></span><Button variant="outline" size="sm" onClick={() => { onContentChange(version.content, true); onNotify("已恢复，恢复前内容已备份"); }}>恢复</Button></div>)}</section>
+      <section className="asset-version-card"><strong>版本记录 · 最近 30 次</strong>{versions.length === 0 && <p>保存快照或采纳生成内容后，可在此恢复。</p>}{versions.map((version) => <div key={version.id}><Save /><span>{version.label}<small>{version.createdAt}</small></span><Button variant="outline" size="sm" onClick={() => { onContentChange(version.content, true); onNotify("已恢复，恢复前内容已备份"); }}>恢复</Button></div>)}</section>
     </aside></section>
   </div>;
 }

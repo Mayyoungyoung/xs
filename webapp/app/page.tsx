@@ -22,10 +22,12 @@ import { chapterWordCount, downloadText } from "@/lib/novel-data";
 import { loadLibrary, normalizeLibrary, readRecoveryData, saveLibrary } from "@/lib/local-library";
 
 import { ModelSettings } from "@/components/novel/model-settings";
+import { CoCreationPanel } from "@/components/novel/co-creation-panel";
 import { desktopBridge } from "@/lib/desktop-bridge";
 import { writingGuidance } from "@/lib/writing-guidance";
 import { defaultChoice, readModelChoice, readSessionCredentials, saveModelChoice, saveSessionCredentials, type ModelChoice, type SessionCredentials } from "@/lib/model-credentials";
 import { CUSTOM_PROVIDER_ID, DEFAULT_PROVIDER_ID, PROVIDERS, providerById, shortModelLabel, validModelName } from "@/lib/model-providers";
+import { type CoTarget } from "@/lib/co-creation";
 
 const navGroups = [
   { label: "故事设计", items: [
@@ -71,6 +73,8 @@ export default function Home() {
   const requestController = useRef<AbortController | null>(null);
   const messageEnd = useRef<HTMLDivElement>(null);
   const [textPrompt, setTextPrompt] = useState<{ kind: "rename" | "preference"; value: string } | null>(null);
+  const [blueprintRun, setBlueprintRun] = useState<{ id: number; instruction: string } | null>(null);
+  const enrichRun = useRef(0);
   const desktopReady = useRef(false);
   const [workspaceSearch, setWorkspaceSearch] = useState("");
   const currentBook = useMemo(() => books.find((book) => book.id === currentBookId) ?? books[0] ?? initialBooks[0], [books, currentBookId]);
@@ -252,11 +256,9 @@ export default function Home() {
   }
 
   async function enrichIdea() {
-    try {
-      const content = await askAI(idea, "story_seed");
-      updateWorkspace((w) => ({ ...w, proposals: { ...w.proposals, overview: content } }));
-      notify("故事构想已生成，请预览后采纳");
-    } catch { /* error is shown beside the composer */ } finally { /* 请求状态由 askAI 管理 */ }
+    if (!idea.trim() || generating) return;
+    setBlueprintRun({ id: enrichRun.current + 1, instruction: idea });
+    enrichRun.current += 1;
   }
 
   async function sendMessage() {
@@ -390,7 +392,7 @@ export default function Home() {
           <div className="module-tools"><span>创作工作区 / {currentLabel}</span><div><Button variant="outline" size="sm" onClick={() => setVersionsOpen(true)}><Clock3 />故事版本</Button>{active !== "timeline" && active !== "references" && <Button variant="outline" size="sm" aria-expanded={assistantVisible} onClick={() => setRightOpen(!assistantVisible)}><MessageCircleMore />{assistantVisible ? "收起共创助手" : "共创助手"}</Button>}</div></div>
           {generating && active !== "timeline" && <div className="module-task-status" role="status"><LoaderCircle className="spin" /><span>AI 正在生成，请稍候…</span><Button size="sm" variant="outline" onClick={() => requestController.current?.abort()}>停止生成</Button></div>}
           {aiError && active !== "timeline" && <p className="ai-error" role="alert">{aiError}</p>}
-          {active === "timeline" ? <WorldlineWorkbench key={currentBook.id} book={currentBook} workspace={workspace} busy={generating} saveState={saveState} onWorkspaceChange={updateWorkspace} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : active === "references" ? <ReferenceWorkbench title={currentBook.title} references={references} onAdd={openReferences} onRemove={removeReference} /> : active !== "overview" ? <AssetWorkbench key={`${currentBook.id}-${active}-${workspace.activeChapterId}`} book={currentBook} type={active} workspace={workspace} busy={generating} saveState={saveState} onProposalConsumed={() => {}} references={references} onWorkspaceChange={updateWorkspace} onContentChange={(content, snapshot) => updateWorkspace((w) => changeAsset(w, active, content, snapshot))} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onNotify={notify} /> : <>
+          {active === "timeline" ? <WorldlineWorkbench key={currentBook.id} book={currentBook} workspace={workspace} busy={generating} saveState={saveState} onWorkspaceChange={updateWorkspace} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : active === "references" ? <ReferenceWorkbench title={currentBook.title} references={references} onAdd={openReferences} onRemove={removeReference} /> : active !== "overview" ? <AssetWorkbench key={`${currentBook.id}-${active}-${workspace.activeChapterId}`} book={currentBook} type={active} workspace={workspace} busy={generating} saveState={saveState} references={references} onWorkspaceChange={updateWorkspace} onContentChange={(content, snapshot) => updateWorkspace((w) => changeAsset(w, active, content, snapshot))} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : <>
           <div className="page-heading">
             <div><div className="eyebrow">{currentBook.title} / {currentLabel}</div><h1>故事蓝图</h1><p>确定故事构想、核心卖点和创作偏好。</p></div>
 
@@ -403,8 +405,27 @@ export default function Home() {
               <Button className="magic-button" onClick={enrichIdea} disabled={generating || !idea.trim()}><Sparkles />{generating ? "正在推演…" : "让 AI 完善"}</Button>
             </div>
           </section>
-
-          {workspace.proposals.overview && <section className="generation-preview blueprint-preview"><header><h2>故事构想预览</h2><span>采纳后更新上方构想</span></header><Textarea aria-label="故事构想预览" value={workspace.proposals.overview} onChange={(e) => { const value = e.target.value; updateWorkspace((w) => ({ ...w, proposals: { ...w.proposals, overview: value } })); }} /><div><Button disabled={generating} onClick={() => { const content = workspace.proposals.overview; updateWorkspace((w) => ({ ...withSnapshot(w, "采纳故事构想前"), idea: content, proposals: { ...w.proposals, overview: "" } })); setBooks((items) => items.map((book) => book.id === currentBook.id ? { ...book, premise: content } : book)); notify("已采纳故事构想，旧内容已保存快照"); }}>采纳故事构想</Button><Button variant="outline" disabled={generating} onClick={() => updateWorkspace((w) => ({ ...w, proposals: { ...w.proposals, overview: "" } }))}>放弃本次结果</Button></div></section>}
+          <div className="blueprint-co">
+            <CoCreationPanel
+              bookId={currentBook.id}
+              workspace={workspace}
+              target={{ moduleId: "overview" }}
+              busy={generating}
+              connection={connection}
+              onWorkspaceChange={updateWorkspace}
+              onGenerate={askAI}
+              onApplyText={(_target: CoTarget, content: string, label: string) => {
+                updateWorkspace((w) => ({ ...withSnapshot(w, label), idea: content }));
+                setBooks((items) => items.map((book) => book.id === currentBook.id ? { ...book, premise: content } : book));
+              }}
+              onApplyRoadmap={() => notify("世界线修改请在世界线中采纳")}
+              onCancel={() => requestController.current?.abort()}
+              onNotify={notify}
+              onOpenReferences={openReferences}
+              onRemoveReference={removeReference}
+              externalRun={blueprintRun}
+            />
+          </div>
           </>}
         </div></section>
 
