@@ -31,6 +31,7 @@ const views = [
 export function WorldlineWorkbench({ book, workspace, busy, saveState, connection, onWorkspaceChange, onGenerate, onAdopt, onOpenReferences, onRemoveReference, onCancel, onNotify }: Props) {
   const [view, setView] = useState<(typeof views)[number]["id"]>("graph");
   const [target, setTarget] = useState<CoTarget | null>(null);
+  const [inspectorHost, setInspectorHost] = useState<HTMLElement | null>(null);
   const roadmap = useMemo(() => getRoadmap(workspace.plot), [workspace.plot]);
   const pendingPreview = useMemo(() => workspace.coProposals
     .filter((proposal) => proposal.status === "pending" && isRoadmapProposal(proposal))
@@ -55,6 +56,10 @@ export function WorldlineWorkbench({ book, workspace, busy, saveState, connectio
   const detailTarget = target && (target.moduleId === "event" || target.moduleId === "line") ? target : null;
   const storedView = workspace.view.roadmap;
   const savedView = storedView ? { x: storedView.x ?? 0, y: storedView.y ?? 0, ...(typeof storedView.lod === "number" ? { lod: storedView.lod } : {}) } : undefined;
+  const layoutMode: "chapters" | "narrative" = workspace.view.roadmap?.mode === 1 ? "narrative" : "chapters";
+  function changeLayoutMode(next: "chapters" | "narrative") {
+    onWorkspaceChange((current) => ({ ...current, view: { ...current.view, roadmap: { ...(current.view.roadmap ?? {}), mode: next === "narrative" ? 1 : 0 } } }));
+  }
 
   return <div className="worldline-workbench">
     <div className="page-heading"><div><div className="eyebrow">{book.title} / 故事设计</div><h1>世界线</h1><p>安排故事如何展开：主线向前推进，支线从事件衍生，多条线在关键事件交汇。</p></div><Button variant="outline" onClick={() => onOpenReferences("plot")}><BookMarked />剧情借鉴</Button></div>
@@ -77,13 +82,17 @@ export function WorldlineWorkbench({ book, workspace, busy, saveState, connectio
             pendingPreview={pendingPreview}
             currentChapterId={workspace.activeChapterId}
             view={savedView}
-            onViewChange={(next) => onWorkspaceChange((current) => ({ ...current, view: { ...current.view, roadmap: next } }))}
+            onViewChange={(next) => onWorkspaceChange((current) => ({ ...current, view: { ...current.view, roadmap: { ...next, ...(current.view.roadmap?.mode !== undefined ? { mode: current.view.roadmap.mode } : {}) } } }))}
+            mode={layoutMode}
+            onModeChange={changeLayoutMode}
+            inspectorHost={inspectorHost}
           /></>}
           {view === "discussion" && <PlotCopilot placeholder={writingGuidance("timeline", book, workspace).placeholder} boundEventIds={workspace.chapters.flatMap((chapter) => chapter.plotEventIds ?? [])} state={workspace.plot} busy={busy} referenceCount={workspace.references.filter((r) => r.scope === "plot").length} onChange={updatePlot} onGenerate={onGenerate} onCancel={onCancel} onApplied={() => { setView("graph"); onNotify("已更新世界线，修改前内容可在故事版本中恢复"); }} />}
         </div>
-        {detailTarget && <aside className="worldline-detail" aria-label="剧情目标详情">
-          <header><div><strong>{targetLabelFor(workspace, detailTarget, roadmap)}</strong><span>点击图上的其他事件可切换目标</span></div><Button size="icon" variant="ghost" aria-label="关闭剧情目标详情" onClick={() => setTarget(null)}><X /></Button></header>
-          <CoCreationPanel
+        {view === "graph" && <aside className="worldline-detail" aria-label="剧情目标详情" aria-hidden={!detailTarget && !inspectorHost ? undefined : undefined}>
+          <header><div><strong>{detailTarget ? targetLabelFor(workspace, detailTarget, roadmap) : "剧情详情"}</strong><span>{detailTarget ? "点击图上的其他事件可切换目标" : "点击事件或故事线开始编辑与共创"}</span></div>{detailTarget && <Button size="icon" variant="ghost" aria-label="关闭剧情目标详情" onClick={() => setTarget(null)}><X /></Button>}</header>
+          <div className="worldline-inspector" ref={setInspectorHost} />
+          {detailTarget ? <CoCreationPanel
             bookId={book.id}
             workspace={workspace}
             target={detailTarget}
@@ -97,7 +106,7 @@ export function WorldlineWorkbench({ book, workspace, busy, saveState, connectio
             onNotify={onNotify}
             onOpenReferences={onOpenReferences}
             onRemoveReference={onRemoveReference}
-          />
+          /> : <p className="worldline-detail-hint">选中一个事件或故事线后，可以在这里直接编辑字段，也可以和 AI 讨论、生成候选。</p>}
         </aside>}
       </div>
     </section>

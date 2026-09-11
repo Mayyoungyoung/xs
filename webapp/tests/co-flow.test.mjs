@@ -178,6 +178,13 @@ test("roadmap candidates are validated, previewed as dashed changes and adopted 
   assert.ok(document.querySelector(".worldline-detail"), "the detail sidebar follows the selection");
   assert.ok(document.querySelector(".co-target").textContent.includes("被篡改的起居注"));
 
+  // One inspector: the editable fields and the co-creation panel share the same
+  // sidebar, and the canvas itself no longer renders a second form.
+  assert.ok(document.querySelector('.worldline-detail [aria-label="事件标题"]'), "editable fields live in the worldline sidebar");
+  assert.ok(document.querySelector('.worldline-detail .co-panel'), "the co-creation panel shares that sidebar");
+  assert.equal(document.querySelector('.roadmap-workbench [aria-label="事件标题"]'), null, "no duplicate form next to the canvas");
+  assert.equal(document.querySelectorAll('[aria-label="事件标题"]').length, 1, "exactly one editor exists");
+
   // A malformed instruction keeps the roadmap untouched and reports why.
   respond = () => "我觉得可以再想想。";
   await fill(byLabel("本页生成要求"), "改一下事件后果");

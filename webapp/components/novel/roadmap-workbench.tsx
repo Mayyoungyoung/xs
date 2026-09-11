@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { ArrowRight, GitBranch, Plus, Pencil, X, Check, Trash2, Link2, ZoomIn, ZoomOut, Maximize2, Scan, Search, Crosshair, Eye, EyeOff, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -8,6 +9,7 @@ import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { eventLines, eventStatus, eventsForLine, getRoadmap, lineColors, type RoadmapEvent, type Storyline, type StoryRoadmap } from "@/lib/story-roadmap";
 import { roadmapSchema } from "@/lib/roadmap-schema";
 import { buildStoryGraph, layoutStoryLanes, selectVisibleStoryGraph, sharedEventHint, unboundEventWarnings, type StoryGraph } from "@/lib/story-graph";
+import { debounce } from "@/lib/timing";
 import type { Chapter, PlotState } from "./book-workspace";
 
 type EditorBase = { kind: "line"; id: string; title: string; goal: string } | { kind: "event"; id: string; title: string; note: string; chapter: string; order: number; status: string };
@@ -20,8 +22,11 @@ type Props = {
   onSelect?: (target: { kind: "event" | "line"; id: string; lineId?: string } | null) => void;
   pendingPreview?: PendingPreview[];
   currentChapterId?: string;
-  view?: { x: number; y: number; lod?: number };
+  view?: { x: number; y: number; lod?: number; mode?: number };
   onViewChange?: (view: { x: number; y: number; lod: number }) => void;
+  mode?: "chapters" | "narrative";
+  onModeChange?: (mode: "chapters" | "narrative") => void;
+  inspectorHost?: HTMLElement | null;
 };
 
 // Zoom decides how much each node shows. The level is derived from the zoom in
@@ -35,7 +40,7 @@ function lodFor(zoom: number, previous?: 0 | 1 | 2): 0 | 1 | 2 {
   return 1;
 }
 
-export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, onSelect, pendingPreview = [], currentChapterId, view, onViewChange }: Props) {
+export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, onSelect, pendingPreview = [], currentChapterId, view, onViewChange, mode = "chapters", onModeChange, inspectorHost }: Props) {
   const roadmap = getRoadmap(state);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [error, setError] = useState("");
@@ -49,7 +54,7 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
   const editorElement = useRef<HTMLElement>(null);
   const editorId = editor?.kind === "event" ? editor.event.id : editor?.kind === "line" ? editor.line.id : editor?.lineId;
   const graph = useMemo(() => buildStoryGraph(roadmap, chapters), [roadmap, chapters]);
-  const layout = useMemo(() => layoutStoryLanes(graph), [graph]);
+  const layout = useMemo(() => layoutStoryLanes(graph, { mode }), [graph, mode]);
   const visible = useMemo(() => selectVisibleStoryGraph(graph, layout, { focusLineId: focus, collapsedLineIds: collapsed, query, lod, ...(currentChapterId ? { currentChapterId } : {}) }), [graph, layout, focus, collapsed, query, lod, currentChapterId]);
   const warnings = useMemo(() => unboundEventWarnings(graph), [graph]);
   const candidateEvents = useMemo(() => new Set(pendingPreview.flatMap((preview) => preview.eventIds)), [pendingPreview]);
@@ -69,24 +74,36 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
   function locateCurrentChapter() {
     if (!currentChapterId) return;
     const zone = layout.zones.find((item) => item.chapterId === currentChapterId);
-    if (!zone) return;
-    viewport.current?.scrollTo({ left: Math.max(0, zone.x * zoom - 40), behavior: "smooth" });
+    if (zone) { viewport.current?.scrollTo({ left: Math.max(0, zone.x * zoom - 40), behavior: "smooth" }); return; }
+    // Narrative view has no zones: jump to the first event bound to this chapter.
+    const target = graph.eventOrder.map((id) => graph.events.find((event) => event.id === id)).find((event) => event?.boundChapters.some((chapter) => chapter.id === currentChapterId));
+    if (!target) return;
+    const position = layout.positions[target.id];
+    if (position) viewport.current?.scrollTo({ left: Math.max(0, position.x * zoom - 40), behavior: "smooth" });
   }
   function toggleCollapse(lineId: string) { setCollapsed((current) => current.includes(lineId) ? current.filter((id) => id !== lineId) : [...current, lineId]); }
 
   // Viewport memory is a per-book preference: scroll position and detail level
   // are saved when the interaction ends. Zoom stays in plot.zoom, so restoring a
   // view can never overwrite the author's zoom choice.
-  const viewTimer = useRef<number | undefined>(undefined);
+  // Scroll fires many times per gesture; the viewport is written once the
+  // interaction settles, and once more when leaving the page. The debounced
+  // writer is created on first use so no ref is touched during render, and it is
+  // rebuilt when the detail level changes so it never writes a stale value.
+  const viewWriter = useRef<{ call: () => void; flush: () => void } | null>(null);
+  const viewWriterLod = useRef<0 | 1 | 2 | null>(null);
   function rememberView() {
-    const element = viewport.current;
-    if (!element || !onViewChange) return;
-    window.clearTimeout(viewTimer.current);
-    viewTimer.current = window.setTimeout(() => {
-      onViewChange({ x: element.scrollLeft, y: element.scrollTop, lod });
-    }, 400);
+    if (!viewWriter.current || viewWriterLod.current !== lod) {
+      viewWriterLod.current = lod;
+      viewWriter.current = debounce(() => {
+        const element = viewport.current;
+        if (!element) return;
+        onViewChange?.({ x: element.scrollLeft, y: element.scrollTop, lod });
+      }, 400);
+    }
+    viewWriter.current.call();
   }
-  useEffect(() => () => window.clearTimeout(viewTimer.current), []);
+  useEffect(() => () => viewWriter.current?.flush(), []);
   useEffect(() => {
     if (!view || !viewport.current || viewport.current.dataset.restored) return;
     viewport.current.dataset.restored = "1";
@@ -172,6 +189,12 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
     if (window.confirm(editor.kind === "line" ? "删除这条故事线？修改前会保留快照。" : "从本线移除此事件？其他故事线中的同一事件会保留。")) commit(candidate);
   }
 
+  // The editable fields render in the worldline's single right sidebar when it
+  // offers a host, and inline otherwise.
+  function renderEditor(node: React.ReactElement) {
+    return inspectorHost ? createPortal(node, inspectorHost) : node;
+  }
+
   const lineRows = graph.lines.map((line) => ({ line, events: graph.eventOrder.flatMap((id) => { const event = graph.events.find((item) => item.id === id); return event && line.eventIds.includes(event.id) ? [event] : []; }) }));
   const laneClass = `lod-${lod}`;
 
@@ -183,12 +206,16 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
         {query && <span className="roadmap-search-count">{visible.matchedEventIds.length} 个匹配{visible.hiddenMatches.length ? ` · 另有 ${visible.hiddenMatches.length} 个在折叠的故事线中` : ""}</span>}
         <Button variant="outline" size="sm" disabled={!currentChapterId} onClick={locateCurrentChapter}><Crosshair />定位当前章节</Button>
         <span className="roadmap-lod" title="缩小看结构与进度，放大看事件细节">{lod === 0 ? <Layers /> : lod === 1 ? <Eye /> : <EyeOff />}{lod === 0 ? "远景" : lod === 1 ? "中景" : "近景"}</span>
+        <NativeSelect aria-label="剧情视图" value={mode} onChange={(event) => onModeChange?.(event.target.value === "narrative" ? "narrative" : "chapters")}>
+          <NativeSelectOption value="chapters">章节分区视图</NativeSelectOption>
+          <NativeSelectOption value="narrative">叙事顺序视图</NativeSelectOption>
+        </NativeSelect>
         {roadmap.lines.length > 0 && <NativeSelect aria-label="聚焦故事线" value={focus} onChange={(event) => setFocus(event.target.value)}><NativeSelectOption value="all">全部故事线</NativeSelectOption>{roadmap.lines.map((line) => <NativeSelectOption key={line.id} value={line.id}>{line.title}</NativeSelectOption>)}</NativeSelect>}
       </div>
     </div>
     {!roadmap.lines.length ? <div className="roadmap-empty"><GitBranch /><h2>先定主线，再让故事分岔与交汇</h2><p>例如：寻找妹妹、追查幕后交易是两条主线；旧照片的秘密从一次发现衍生，最后在揭露真相时交汇。</p><Button variant="outline" disabled={busy} onClick={onDiscuss}>让 AI 一起设计故事路线</Button></div> : <>
       <div className="roadmap-summary"><span>{graph.lines.filter((line) => line.kind === "main").length} 条主线</span><span>{graph.lines.filter((line) => line.kind === "branch").length} 条支线</span><span>{graph.sharedCount} 个交汇点</span><span>已写 {graph.doneEvents} / {graph.totalEvents} 个事件</span>{graph.unplannedCount > 0 && <span className="is-pending">{graph.unplannedCount} 个事件待安排章节</span>}</div>
-      <p className="roadmap-reading-guide">从左向右推进 · 每行一条故事线 · 相同的交汇事件用竖线连接 · 点击事件编辑</p>
+      <p className="roadmap-reading-guide">{layout.mode === "narrative" ? "按叙事顺序从左向右推进 · 章节写在事件卡上作为属性 · 每行一条故事线" : "按章节分区 · 区内从左向右推进 · 每行一条故事线 · 相同的交汇事件用竖线连接"}</p>
       {warnings.length > 0 && <p className="roadmap-warning" role="status">这些事件的章节文字没有对应的章节绑定，请到「章节正文」重新选择：{warnings.map((warning) => warning.title).join("、")}。</p>}
       {layout.warnings.length > 0 && <p className="roadmap-warning" role="status">{layout.warnings.join("；")}</p>}
       {pendingPreview.length > 0 && <section className="roadmap-candidates" aria-label="待采纳剧情修改"><header><Layers /><strong>AI 提出了 {pendingPreview.length} 组待采纳修改</strong><span>虚线标记的事件会变化，未采纳前不影响正式剧情</span></header>{pendingPreview.map((preview) => <div key={preview.id}><em>{preview.targetLabel}</em><ul>{preview.descriptions.map((description, index) => <li key={index}>{description}</li>)}</ul></div>)}<Button variant="outline" size="sm" onClick={onDiscuss}>去采纳或拒绝</Button></section>}
@@ -204,7 +231,7 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
                   return rows.length > 1 ? <path key={event.id} d={`M${layout.positions[event.id].x + 95} ${rows[0] * layout.laneHeight + 122} V${rows.at(-1)! * layout.laneHeight + 122}`} stroke="#98866f" strokeWidth="2" strokeDasharray="5 5" /> : null;
                 })}
               </svg>
-              {layout.zones.length > 0 && <div className="roadmap-stages" aria-hidden="true">{layout.zones.map((zone) => <div key={zone.id} className={`roadmap-zone ${zone.kind === "unplanned" ? "is-unplanned" : ""} ${visible.currentColumnId === zone.id ? "is-current" : ""}`} style={{ left: zone.x, width: zone.width }}><header><span>{zone.label}</span><em>{zone.kind === "unplanned" ? "计划区 · 未安排章节" : `${zone.eventIds.length} 个事件`}{visible.currentColumnId === zone.id ? " · 正在写" : ""}</em></header></div>)}</div>}
+              {layout.mode === "chapters" && layout.zones.length > 0 && <div className="roadmap-stages" aria-hidden="true">{layout.zones.map((zone) => <div key={zone.id} className={`roadmap-zone ${zone.kind === "unplanned" ? "is-unplanned" : ""} ${visible.currentColumnId === zone.id ? "is-current" : ""}`} style={{ left: zone.x, width: zone.width }}><header><span>{zone.label}</span><em>{zone.kind === "unplanned" ? "计划区 · 未安排章节" : `${zone.eventIds.length} 个事件`}{visible.currentColumnId === zone.id ? " · 正在写" : ""}</em></header></div>)}</div>}
               {lineRows.map(({ line }, row) => {
                 const isCollapsed = collapsed.includes(line.id);
                 const dimmed = visible.dimmedLineIds.includes(line.id);
@@ -238,7 +265,7 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
       </section>
       <div className="roadmap-next"><strong>下一步可推进</strong><p>{next.length ? next.join("；") : "主线事件已全部标记完成，或尚未添加事件。"}</p><small>在「章节正文」选择本章要推进的事件；完成标记由作者确认。</small></div>
     </>}
-    {editor && <section ref={editorElement} className="roadmap-editor" aria-label="故事线编辑"><header><h2>{editor.kind === "line" ? `${editor.fresh ? "添加" : "编辑"}${editor.line.kind === "main" ? "主线" : "支线"}` : editor.kind === "join" ? "让两条故事线在此交汇" : editor.fresh ? "添加剧情事件" : "编辑剧情事件"}</h2><Button size="icon" variant="ghost" aria-label="关闭故事线编辑" onClick={closeEditor}><X /></Button></header>
+    {editor && renderEditor(<section ref={editorElement} className="roadmap-editor" aria-label="故事线编辑"><header><h2>{editor.kind === "line" ? `${editor.fresh ? "添加" : "编辑"}${editor.line.kind === "main" ? "主线" : "支线"}` : editor.kind === "join" ? "让两条故事线在此交汇" : editor.fresh ? "添加剧情事件" : "编辑剧情事件"}</h2><Button size="icon" variant="ghost" aria-label="关闭故事线编辑" onClick={closeEditor}><X /></Button></header>
       {editor.kind === "line" ? <><label className="form-field"><span>故事线名称</span><input aria-label="故事线名称" maxLength={80} value={editor.line.title} onChange={(event) => setEditor({ ...editor, line: { ...editor.line, title: event.target.value } })} /></label><label className="form-field"><span>这条线要达成什么？最终如何收束？</span><Textarea aria-label="故事线目标" maxLength={2000} value={editor.line.goal} onChange={(event) => setEditor({ ...editor, line: { ...editor.line, goal: event.target.value } })} /></label>{editor.line.kind === "branch" && editor.fresh && <label className="form-field"><span>从哪个事件衍生？</span><NativeSelect aria-label="支线衍生起点" value={editor.line.originId ?? ""} onChange={(event) => setEditor({ ...editor, line: { ...editor.line, originId: event.target.value } })}>{roadmap.events.map((event) => <NativeSelectOption key={event.id} value={event.id}>{event.title}</NativeSelectOption>)}</NativeSelect></label>}</> : editor.kind === "join" ? <><p>选择另一条线已有的事件。两条线会共享同一事件，修改和完成状态同步。</p><NativeSelect aria-label="交汇事件" value={editor.eventId} onChange={(event) => setEditor({ ...editor, eventId: event.target.value })}><NativeSelectOption value="">选择交汇点</NativeSelectOption>{roadmap.events.filter((event) => !roadmap.lines.find((line) => line.id === editor.lineId)?.eventIds.includes(event.id)).map((event) => <NativeSelectOption key={event.id} value={event.id}>{event.title} · {eventLines(roadmap, event.id).map((line) => line.title).join(" / ")}</NativeSelectOption>)}</NativeSelect></> : <>
         {!editor.fresh && eventLines(roadmap, editor.event.id).length > 1 && <p className="roadmap-shared-note">这是共享事件，修改会同步到：{eventLines(roadmap, editor.event.id).map((line) => line.title).join("、")}。</p>}
         <label className="form-field"><span>发生什么事？</span><input aria-label="事件标题" maxLength={80} value={editor.event.title} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, title: event.target.value } })} /></label><div className="roadmap-editor-row"><label className="form-field"><span>推进顺序（数字小的在前）</span><input aria-label="事件推进顺序" type="number" min={0} max={10000} step="any" value={editor.event.order} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, order: Number(event.target.value) } })} /></label><label className="form-field"><span>计划章节，例如 1–3</span><input aria-label="事件计划章节" maxLength={40} value={editor.event.chapter} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, chapter: event.target.value } })} /></label><label className="form-field"><span>写作进度</span><NativeSelect aria-label="事件写作进度" value={editor.event.status} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, status: event.target.value as RoadmapEvent["status"] } })}>{Object.entries(eventStatus).map(([value, label]) => <NativeSelectOption key={value} value={value}>{label}</NativeSelectOption>)}</NativeSelect></label></div><label className="form-field"><span>人物选择、代价与后果</span><Textarea aria-label="事件剧情说明" maxLength={800} value={editor.event.note} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, note: event.target.value } })} /></label>
@@ -246,7 +273,7 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
       {error && <p className="ai-error" role="alert">{error}</p>}
       {staleFields().length > 0 && <p className="roadmap-stale" role="status">正式内容已更新，可重新载入：<Button variant="outline" size="sm" disabled={busy} onClick={() => begin(editor.kind === "event" ? { kind: "event", event: roadmap.events.find((event) => event.id === editor.event.id) ?? editor.event, lineId: editor.lineId, fresh: false } : editor.kind === "line" ? { kind: "line", line: roadmap.lines.find((line) => line.id === editor.line.id) ?? editor.line, fresh: false } : editor)}>重新载入正式内容</Button></p>}
       <footer>{editor.kind !== "join" && !editor.fresh && <Button variant="ghost" disabled={busy} onClick={remove}><Trash2 />{editor.kind === "line" ? "删除故事线" : "从本线移除"}</Button>}<Button variant="outline" onClick={closeEditor}>取消</Button><Button disabled={busy} onClick={save}><Check />{editor.kind === "join" ? "建立交汇" : "保存安排"}</Button></footer>
-    </section>}
+    </section>)}
   </div>;
 }
 

@@ -112,7 +112,10 @@ export type StoryZone = {
   eventIds: string[];
 };
 
+export type StoryLayoutMode = "chapters" | "narrative";
+
 export type StoryLayout = {
+  mode: StoryLayoutMode;
   zones: StoryZone[];
   eventOrder: string[];
   positions: Record<string, StoryPosition>;
@@ -126,7 +129,7 @@ export type StoryLayout = {
   warnings: string[];
 };
 
-export type StoryLayoutOptions = { laneHeight?: number; cardWidth?: number; zoneWidth?: number };
+export type StoryLayoutOptions = { laneHeight?: number; cardWidth?: number; zoneWidth?: number; mode?: StoryLayoutMode };
 
 const ZONE_PADDING = 18;
 const ZONE_GAP = 28;
@@ -138,6 +141,7 @@ export function layoutStoryLanes(graph: StoryGraph, options: StoryLayoutOptions 
   const laneHeight = options.laneHeight ?? 244;
   const cardWidth = options.cardWidth ?? 190;
   const zoneWidth = options.zoneWidth ?? cardWidth + 56;
+  const mode = options.mode ?? "chapters";
   const rowOf = new Map(graph.lines.map((line, index) => [line.id, index]));
   const rowsOfEvent = (eventId: string) => {
     const event = graph.events.find((item) => item.id === eventId);
@@ -159,6 +163,39 @@ export function layoutStoryLanes(graph: StoryGraph, options: StoryLayoutOptions 
   const positions: Record<string, StoryPosition> = {};
   const zones: StoryZone[] = [];
   let cursorX = 0;
+
+  // Narrative order keeps one column per event, with the chapter kept only as a
+  // node attribute. The two semantics never share one horizontal axis.
+  if (mode === "narrative") {
+    graph.eventOrder.forEach((eventId, narrativeIndex) => {
+      const event = graph.events.find((item) => item.id === eventId);
+      if (!event) return;
+      const lineId = event.primaryLineId || graph.lines[0]?.id || "";
+      positions[eventId] = {
+        x: 222 + narrativeIndex * (cardWidth + 48),
+        y: (rowOf.get(lineId) ?? 0) * laneHeight,
+        zoneId: event.boundChapters[0]?.id ? `chapter-${event.boundChapters[0].id}` : "unplanned",
+        slot: 0,
+        row: rowOf.get(lineId) ?? 0,
+        lineId,
+      };
+    });
+    const laneCount = Math.max(graph.lines.length, 1);
+    return {
+      mode,
+      zones: [],
+      eventOrder: graph.eventOrder,
+      positions,
+      width: Math.max(780, graph.eventOrder.length * (cardWidth + 48) + 240),
+      height: laneCount * laneHeight,
+      laneHeight,
+      cardWidth,
+      laneCount,
+      sharedCount: graph.sharedCount,
+      unplannedCount: graph.unplannedCount,
+      warnings,
+    };
+  }
 
   for (const column of graph.columns) {
     // Slots inside this zone: a slot is a set of occupied rows.
@@ -210,6 +247,7 @@ export function layoutStoryLanes(graph: StoryGraph, options: StoryLayoutOptions 
 
   const laneCount = Math.max(graph.lines.length, 1);
   return {
+    mode,
     zones,
     eventOrder: graph.eventOrder,
     positions,

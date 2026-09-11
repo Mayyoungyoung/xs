@@ -131,6 +131,21 @@ test("parallel events share a slot, clashing cards get another one, nothing over
   assert.equal(shared.zones[0].slotCount, 1);
 });
 
+test("the narrative view lays events by narrative order with the chapter as an attribute", () => {
+  const graph = buildStoryGraph(roadmap, chapters);
+  const chapterView = layoutStoryLanes(graph);
+  const narrativeView = layoutStoryLanes(graph, { mode: "narrative" });
+  assert.equal(chapterView.mode, "chapters");
+  assert.equal(narrativeView.mode, "narrative");
+  assert.deepEqual(narrativeView.zones, [], "the narrative view has no chapter zones: the two semantics never share one axis");
+  const xs = narrativeView.eventOrder.map((id) => narrativeView.positions[id].x);
+  assert.deepEqual([...xs].sort((a, b) => a - b), xs, "events run left to right in narrative order");
+  assert.equal(new Set(xs).size, xs.length, "each event owns one column in this view");
+  assert.deepEqual(narrativeView.eventOrder, chapterView.eventOrder, "both views describe the same events in the same order");
+  assert.deepEqual(graph.events.find((event) => event.id === "e2").boundChapters.map((chapter) => chapter.id), ["c3"], "the chapter stays available as an event attribute");
+  assert.deepEqual(layoutStoryLanes(graph, { mode: "narrative" }), narrativeView, "narrative layout is deterministic too");
+});
+
 test("chapter text that contradicts the binding is reported, never re-scheduled", () => {
   const conflicting = buildStoryGraph({
     lines: [{ id: "m", title: "M", goal: "", kind: "main", color: "#8b372f", eventIds: ["a"] }],
