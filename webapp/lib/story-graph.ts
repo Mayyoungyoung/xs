@@ -36,24 +36,6 @@ export type StoryGraph = {
   doneEvents: number;
 };
 
-export type StoryPosition = { x: number; y: number; columnIndex: number; row: number; index: number; lineId: string };
-
-export type StoryLayout = {
-  columns: StoryColumn[];
-  columnStarts: Record<string, number>;
-  eventOrder: string[];
-  positions: Record<string, StoryPosition>;
-  width: number;
-  height: number;
-  laneHeight: number;
-  columnWidth: number;
-  laneCount: number;
-  sharedCount: number;
-  unplannedCount: number;
-};
-
-export type StoryLayoutOptions = { laneHeight?: number; columnWidth?: number };
-
 export function buildStoryGraph(roadmap: StoryRoadmap, chapters: GraphChapter[] = []): StoryGraph {
   const bound = new Map<string, Array<{ id: string; title: string; index: number }>>();
   chapters.forEach((chapter, index) => {
@@ -65,7 +47,13 @@ export function buildStoryGraph(roadmap: StoryRoadmap, chapters: GraphChapter[] 
   });
   const events: StoryGraphEvent[] = roadmap.events.map((event) => {
     const lineIds = eventLines(roadmap, event.id).map((line) => line.id);
-    return { ...event, lineIds, shared: lineIds.length > 1, primaryLineId: lineIds[0] ?? "", boundChapters: (bound.get(event.id) ?? []).sort((a, b) => a.index - b.index) };
+    return {
+      ...event,
+      lineIds,
+      shared: lineIds.length > 1,
+      primaryLineId: lineIds[0] ?? "",
+      boundChapters: (bound.get(event.id) ?? []).sort((a, b) => a.index - b.index),
+    };
   });
   const ordered = [...events].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
   const lines: StoryGraphLine[] = roadmap.lines
@@ -107,53 +95,132 @@ function buildColumns(ordered: StoryGraphEvent[], chapters: GraphChapter[]): Sto
   return unplanned.length ? [...columns, { id: "unplanned", kind: "unplanned", label: "待安排章节", eventIds: unplanned }] : columns;
 }
 
-// Lane rows follow the graph order (main lines on top), positions follow the
-// narrative order left to right, and each event's stage comes from its column.
-// Same input, same output — no randomness, no measuring.
+export type StoryPosition = { x: number; y: number; zoneId: string; slot: number; row: number; lineId: string };
+
+// A zone is a real region on the canvas: one chapter (from the authoritative
+// chapter bindings) or the explicit unplanned area. It has a start, a width and
+// the events that live inside it.
+export type StoryZone = {
+  id: string;
+  kind: "chapter" | "unplanned";
+  label: string;
+  chapterId?: string;
+  chapterIndex?: number;
+  x: number;
+  width: number;
+  slotCount: number;
+  eventIds: string[];
+};
+
+export type StoryLayout = {
+  zones: StoryZone[];
+  eventOrder: string[];
+  positions: Record<string, StoryPosition>;
+  width: number;
+  height: number;
+  laneHeight: number;
+  cardWidth: number;
+  laneCount: number;
+  sharedCount: number;
+  unplannedCount: number;
+  warnings: string[];
+};
+
+export type StoryLayoutOptions = { laneHeight?: number; cardWidth?: number; zoneWidth?: number };
+
+const ZONE_PADDING = 18;
+const ZONE_GAP = 28;
+
+// Lane rows follow the graph order (main lines on top). Inside a zone the events
+// are ordered by narrative order and packed into slots: events whose lanes do not
+// clash share a slot, so a chapter does not need one column per event.
 export function layoutStoryLanes(graph: StoryGraph, options: StoryLayoutOptions = {}): StoryLayout {
   const laneHeight = options.laneHeight ?? 244;
-  const columnWidth = options.columnWidth ?? 238;
-  const columns = graph.columns;
-  const columnIndex = new Map(columns.map((column, index) => [column.id, index]));
-  const eventColumn = new Map<string, string>();
-  for (const column of columns) for (const eventId of column.eventIds) if (!eventColumn.has(eventId)) eventColumn.set(eventId, column.id);
+  const cardWidth = options.cardWidth ?? 190;
+  const zoneWidth = options.zoneWidth ?? cardWidth + 56;
   const rowOf = new Map(graph.lines.map((line, index) => [line.id, index]));
-  const perColumnIndex = new Map<string, number>();
-  const positions: Record<string, StoryPosition> = {};
-  graph.eventOrder.forEach((eventId, narrativeIndex) => {
+  const rowsOfEvent = (eventId: string) => {
     const event = graph.events.find((item) => item.id === eventId);
-    if (!event) return;
-    const lineId = event.primaryLineId || graph.lines[0]?.id || "";
-    const columnId = eventColumn.get(eventId) ?? "unplanned";
-    const key = `${columnId}::${lineId}`;
-    const index = perColumnIndex.get(key) ?? 0;
-    perColumnIndex.set(key, index + 1);
-    positions[eventId] = {
-      x: 222 + narrativeIndex * columnWidth,
-      y: (rowOf.get(lineId) ?? 0) * laneHeight,
-      columnIndex: columnIndex.get(columnId) ?? 0,
-      row: rowOf.get(lineId) ?? 0,
-      index,
-      lineId,
+    if (!event) return [];
+    const rows = new Set<number>();
+    // The primary lane draws the card; every other lane referencing it draws an anchor.
+    for (const lineId of event.lineIds) {
+      const row = rowOf.get(lineId);
+      if (row !== undefined) rows.add(row);
+    }
+    if (event.primaryLineId) {
+      const row = rowOf.get(event.primaryLineId);
+      if (row !== undefined) rows.add(row);
+    }
+    return [...rows].sort((a, b) => a - b);
+  };
+
+  const warnings: string[] = [];
+  const positions: Record<string, StoryPosition> = {};
+  const zones: StoryZone[] = [];
+  let cursorX = 0;
+
+  for (const column of graph.columns) {
+    // Slots inside this zone: a slot is a set of occupied rows.
+    const slots: Array<Set<number>> = [];
+    const slotOf = new Map<string, number>();
+    for (const eventId of column.eventIds) {
+      const rows = rowsOfEvent(eventId);
+      let slot = slots.findIndex((occupied) => rows.every((row) => !occupied.has(row)));
+      if (slot < 0) { slots.push(new Set()); slot = slots.length - 1; }
+      for (const row of rows) slots[slot].add(row);
+      slotOf.set(eventId, slot);
+    }
+    const slotCount = Math.max(slots.length, 1);
+    const width = slotCount * zoneWidth + ZONE_PADDING * 2;
+    const zone: StoryZone = {
+      id: column.id, kind: column.kind, label: column.label,
+      ...(column.chapterId ? { chapterId: column.chapterId } : {}),
+      ...(column.chapterIndex !== undefined ? { chapterIndex: column.chapterIndex } : {}),
+      x: cursorX, width, slotCount, eventIds: [...column.eventIds],
     };
-  });
-  const columnStarts: Record<string, number> = {};
-  for (const column of columns) {
-    const xs = column.eventIds.map((id) => positions[id]?.x).filter((value): value is number => typeof value === "number");
-    if (xs.length) columnStarts[column.id] = Math.max(0, Math.min(...xs) - columnWidth / 2 - 20);
+    zones.push(zone);
+    for (const eventId of column.eventIds) {
+      const slot = slotOf.get(eventId) ?? 0;
+      const row = rowOf.get(graph.events.find((item) => item.id === eventId)?.primaryLineId ?? "") ?? 0;
+      positions[eventId] = {
+        x: zone.x + ZONE_PADDING + slot * zoneWidth,
+        y: row * laneHeight,
+        zoneId: zone.id,
+        slot,
+        row,
+        lineId: graph.events.find((item) => item.id === eventId)?.primaryLineId ?? "",
+      };
+    }
+    cursorX += width + ZONE_GAP;
   }
+
+  // An event whose chapter text points at a different chapter than its binding is
+  // reported, never silently re-scheduled.
+  for (const event of graph.events) {
+    const bound = event.boundChapters[0];
+    if (!bound) continue;
+    const text = event.chapter.trim();
+    if (!text || /^(待安排|待定|未安排)/.test(text)) continue;
+    const single = text.match(/^(?:第\s*)?(\d+)\s*(?:章)?$/);
+    if (single && Number(single[1]) !== bound.index + 1) {
+      warnings.push(`「${event.title}」写在第 ${single[1]} 章，但已绑定到「${bound.title}」；以章节绑定为准。`);
+    }
+  }
+
+  const laneCount = Math.max(graph.lines.length, 1);
   return {
-    columns,
-    columnStarts,
+    zones,
     eventOrder: graph.eventOrder,
     positions,
-    width: Math.max(780, graph.eventOrder.length * columnWidth + 240),
-    height: Math.max(graph.lines.length, 1) * laneHeight,
+    width: Math.max(780, cursorX - ZONE_GAP),
+    height: laneCount * laneHeight,
     laneHeight,
-    columnWidth,
-    laneCount: Math.max(graph.lines.length, 1),
+    cardWidth,
+    laneCount,
     sharedCount: graph.sharedCount,
     unplannedCount: graph.unplannedCount,
+    warnings,
   };
 }
 
@@ -172,6 +239,7 @@ export type VisibleStoryGraph = {
   dimmedLineIds: string[];
   lod: 0 | 1 | 2;
   hiddenEventIds: string[];
+  hiddenMatches: string[];
   currentColumnId?: string;
 };
 
@@ -180,15 +248,21 @@ export type VisibleStoryGraph = {
 export function selectVisibleStoryGraph(graph: StoryGraph, layout: StoryLayout, view: GraphView = {}): VisibleStoryGraph {
   const collapsed = new Set(view.collapsedLineIds ?? []);
   const query = (view.query ?? "").trim().toLowerCase();
-  const dimmedLineIds = graph.lines.filter((line) => view.focusLineId && view.focusLineId !== "all" && line.id !== view.focusLineId).map((line) => line.id);
+  const focused = view.focusLineId && view.focusLineId !== "all" ? view.focusLineId : undefined;
+  const dimmedLineIds = graph.lines.filter((line) => focused && line.id !== focused).map((line) => line.id);
   const matchedEventIds: string[] = [];
   const nodes: VisibleStoryGraph["nodes"] = [];
   const hiddenEventIds: string[] = [];
   for (const event of graph.events) {
     const position = layout.positions[event.id];
     if (!position) continue;
-    if (collapsed.has(position.lineId) && event.lineIds.every((id) => collapsed.has(id))) { hiddenEventIds.push(event.id); continue; }
-    let dimmed = dimmedLineIds.includes(position.lineId);
+    // Collapsing really removes nodes and their edges, but a shared event stays
+    // while at least one of the lines it belongs to is still expanded.
+    if (event.lineIds.length && event.lineIds.every((id) => collapsed.has(id))) { hiddenEventIds.push(event.id); continue; }
+    // Focus follows every line the event belongs to, not just its primary lane,
+    // so a focused branch keeps its origin and its shared intersections visible.
+    let dimmed = focused ? !event.lineIds.includes(focused) : false;
+    if (!dimmed && focused && dimmedLineIds.length && event.lineIds.length === 0) dimmed = false;
     if (query) {
       const haystack = `${event.title} ${event.note} ${event.chapter} ${event.lineIds.map((id) => graph.lines.find((line) => line.id === id)?.title ?? "").join(" ")}`.toLowerCase();
       if (haystack.includes(query)) matchedEventIds.push(event.id); else dimmed = true;
@@ -201,6 +275,8 @@ export function selectVisibleStoryGraph(graph: StoryGraph, layout: StoryLayout, 
       boundHere: Boolean(view.currentChapterId && event.boundChapters.some((chapter) => chapter.id === view.currentChapterId)),
     });
   }
+  // Search hits inside collapsed lines are surfaced so the author can expand them.
+  const hiddenMatches = graph.events.filter((event) => hiddenEventIds.includes(event.id) && query && `${event.title} ${event.note}`.toLowerCase().includes(query)).map((event) => event.id);
   const currentColumn = view.currentChapterId ? graph.columns.find((column) => column.chapterId === view.currentChapterId) : undefined;
   return {
     lines: graph.lines,
@@ -209,6 +285,7 @@ export function selectVisibleStoryGraph(graph: StoryGraph, layout: StoryLayout, 
     dimmedLineIds,
     lod: view.lod ?? 2,
     hiddenEventIds,
+    hiddenMatches,
     ...(currentColumn ? { currentColumnId: currentColumn.id } : {}),
   };
 }

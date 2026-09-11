@@ -58,30 +58,108 @@ test("lane layout is deterministic and never invents positions", () => {
   assert.deepEqual(first, second, "same roadmap always lays out identically");
   assert.equal(first.laneCount, 3);
   assert.equal(first.height, 3 * 244);
-  assert.equal(first.width, Math.max(780, 3 * 238 + 240));
-  const e1 = first.positions.e1;
-  const e2 = first.positions.e2;
-  const e3 = first.positions.e3;
-  assert.deepEqual([e1.columnIndex, e1.row, e1.lineId], [0, 0, "main-a"]);
-  assert.deepEqual([e2.columnIndex, e2.row, e2.lineId], [1, 0, "main-a"]);
-  assert.deepEqual([e3.columnIndex, e3.row, e3.lineId], [2, 0, "main-a"], "unplanned area sits after real chapters");
   assert.equal(Object.keys(first.positions).length, 3);
   const single = layoutStoryLanes(buildStoryGraph({ lines: [{ id: "m", title: "M", goal: "", kind: "main", color: "#8b372f", eventIds: ["x"] }], events: [{ id: "x", title: "X", note: "", order: 1, chapter: "", status: "planned" }] }, []));
-  assert.equal(single.width, 780, "a short roadmap keeps the minimum comfortable width");
+  assert.ok(single.width >= 780, "a short roadmap keeps the minimum comfortable width");
+});
+
+test("chapter zones have real extents, never invert, and hold their own nodes", () => {
+  const graph = buildStoryGraph(roadmap, chapters);
+  const layout = layoutStoryLanes(graph);
+  assert.deepEqual(layout.zones.map((zone) => [zone.id, zone.kind]), [["chapter-c1", "chapter"], ["chapter-c3", "chapter"], ["unplanned", "unplanned"]]);
+  for (let index = 1; index < layout.zones.length; index++) {
+    const previous = layout.zones[index - 1];
+    const current = layout.zones[index];
+    assert.ok(current.x >= previous.x + previous.width, "zones never overlap or invert");
+    assert.ok(current.width > 0 && previous.width > 0, "every zone has a real width");
+  }
+  const unplanned = layout.zones.at(-1);
+  assert.equal(unplanned.kind, "unplanned");
+  assert.equal(unplanned.label, "待安排章节", "the pending area is not dressed up as a scheduled chapter");
+  for (const zone of layout.zones) {
+    for (const eventId of zone.eventIds) {
+      const position = layout.positions[eventId];
+      assert.ok(position.x >= zone.x && position.x + layout.cardWidth <= zone.x + zone.width, `${eventId} sits inside ${zone.id}`);
+    }
+  }
+  // e3 is unplanned: it must not appear in a chapter zone's box.
+  const e3Zone = layout.zones.find((zone) => zone.eventIds.includes("e3"));
+  assert.equal(e3Zone.kind, "unplanned");
+  assert.ok(layout.width >= unplanned.x + unplanned.width);
+});
+
+test("parallel events share a slot, clashing cards get another one, nothing overlaps", () => {
+  const graph = buildStoryGraph(roadmap, chapters);
+  const layout = layoutStoryLanes(graph);
+  for (const zone of layout.zones) {
+    // Two cards in the same zone may share an x only when their lane sets are disjoint.
+    const byX = new Map();
+    for (const eventId of zone.eventIds) {
+      const position = layout.positions[eventId];
+      const rows = new Set(graph.events.find((event) => event.id === eventId).lineIds.map((lineId) => graph.lines.findIndex((line) => line.id === lineId)));
+      const others = byX.get(position.x) ?? [];
+      for (const other of others) for (const row of rows) assert.ok(!other.has(row), "cards sharing a slot never share a lane");
+      others.push(rows);
+      byX.set(position.x, others);
+    }
+  }
+  // Two events on the same lane inside one chapter cannot share a slot.
+  const sameLane = buildStoryGraph({
+    lines: [{ id: "m", title: "M", goal: "", kind: "main", color: "#8b372f", eventIds: ["a", "b"] }],
+    events: [
+      { id: "a", title: "A", note: "", order: 1, chapter: "1", status: "planned" },
+      { id: "b", title: "B", note: "", order: 2, chapter: "1", status: "planned" },
+    ],
+  }, [{ id: "c1", title: "第 1 章", plotEventIds: ["a", "b"] }]);
+  const packed = layoutStoryLanes(sameLane);
+  assert.notEqual(packed.positions.a.x, packed.positions.b.x, "the second card takes the next slot in the same chapter");
+  assert.equal(packed.zones[0].slotCount, 2);
+
+  // Events on different lanes of the same chapter may share one slot.
+  const parallel = buildStoryGraph({
+    lines: [
+      { id: "m", title: "M", goal: "", kind: "main", color: "#8b372f", eventIds: ["a"] },
+      { id: "n", title: "N", goal: "", kind: "main", color: "#346783", eventIds: ["b"] },
+    ],
+    events: [
+      { id: "a", title: "A", note: "", order: 1, chapter: "1", status: "planned" },
+      { id: "b", title: "B", note: "", order: 2, chapter: "1", status: "planned" },
+    ],
+  }, [{ id: "c1", title: "第 1 章", plotEventIds: ["a", "b"] }]);
+  const shared = layoutStoryLanes(parallel);
+  assert.equal(shared.positions.a.x, shared.positions.b.x, "parallel work in one chapter shares a column");
+  assert.equal(shared.zones[0].slotCount, 1);
+});
+
+test("chapter text that contradicts the binding is reported, never re-scheduled", () => {
+  const conflicting = buildStoryGraph({
+    lines: [{ id: "m", title: "M", goal: "", kind: "main", color: "#8b372f", eventIds: ["a"] }],
+    events: [{ id: "a", title: "A", note: "", order: 1, chapter: "5", status: "planned" }],
+  }, [{ id: "c1", title: "第 1 章", plotEventIds: ["a"] }]);
+  const layout = layoutStoryLanes(conflicting);
+  assert.equal(layout.zones[0].id, "chapter-c1", "the binding wins over the free-text chapter");
+  assert.ok(layout.warnings.some((warning) => warning.includes("第 5 章")), "the contradiction is surfaced");
+  assert.deepEqual(conflicting.events[0].chapter, "5", "the author's data is never rewritten");
 });
 
 test("zoom level decides detail, while focus, collapse and search only dim", () => {
   const graph = buildStoryGraph(roadmap, chapters);
   const layout = layoutStoryLanes(graph);
+  const before = JSON.stringify(layout);
   const far = selectVisibleStoryGraph(graph, layout, { lod: 0 });
   const near = selectVisibleStoryGraph(graph, layout, { lod: 2 });
+  assert.equal(JSON.stringify(layout), before, "changing the view never rewrites geometry");
+  assert.deepEqual(graph.eventOrder, buildStoryGraph(roadmap, chapters).eventOrder, "changing the view never rewrites event ids or order");
   assert.equal(far.lod, 0);
   assert.equal(near.lod, 2);
   assert.deepEqual(far.nodes.map((node) => node.event.id), near.nodes.map((node) => node.event.id), "changing zoom never reorders or drops nodes");
 
   const focused = selectVisibleStoryGraph(graph, layout, { focusLineId: "main-b" });
   assert.deepEqual(focused.dimmedLineIds.sort(), ["branch-a", "main-a"]);
-  assert.equal(focused.nodes.every((node) => node.dimmed === (node.position.lineId !== "main-b")), true);
+  assert.equal(focused.nodes.every((node) => node.dimmed === !node.event.lineIds.includes("main-b")), true, "focus follows every owning line, not just the primary lane");
+  const sharedInFocus = focused.nodes.find((node) => node.event.id === "e2");
+  assert.equal(sharedInFocus.position.lineId, "main-a");
+  assert.equal(sharedInFocus.dimmed, false, "a shared event stays visible even when its card lives on another lane");
 
   const collapsed = selectVisibleStoryGraph(graph, layout, { collapsedLineIds: ["branch-a"] });
   assert.deepEqual(collapsed.hiddenEventIds, [], "an event that also lives on a visible line is never hidden");

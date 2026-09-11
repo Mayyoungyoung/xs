@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   ADOPT_MODE_LABELS, anchorFromRange, anchorValid, adoptTextProposal, appendThreadMessage, applyRoadmapOps,
   availableAdoptModes, buildCoContext, clearThread, contentHash, isLocked, makeTextProposal, normalizeProposals,
-  normalizeThreads, parseRoadmapOps, pendingProposalsFor, relocateAnchor, targetKey, toggleLock,
+  normalizeThreads, parseRoadmapOps, pendingProposalsFor, resolveAnchor, targetKey, toggleLock,
 } from "../lib/co-creation.ts";
 
 const roadmap = {
@@ -33,22 +33,43 @@ function proposal(overrides = {}) {
   return makeTextProposal({ bookId: "bk", target: { moduleId: "chapters", entityId: "c1" }, targetLabel: "章节正文 / 第 1 章", content, after: "林晚站在雨里，风把伞骨掀翻。", scope: "full", baseRevision: 0, threadKey: "chapters::c1", now: "2026-09-11T00:00:00.000Z", id: "p1", ...overrides });
 }
 
-test("selection anchors only survive while the exact text stays in place", () => {
+test("anchors resolve without guessing: exact, unique-by-context, ambiguous or missing", () => {
   const content = "第一段。第二段。第三段。";
   const anchor = anchorFromRange(content, 4, 7);
-  assert.deepEqual(anchor, { start: 4, end: 7, text: "第二段" });
+  assert.deepEqual([anchor.start, anchor.end, anchor.text], [4, 7, "第二段"]);
   assert.equal(anchorValid(content, anchor), true);
+  assert.equal(resolveAnchor(content, anchor).status, "exact");
   assert.equal(anchorValid(content.replace("第二段", "改动段"), anchor), false);
   assert.equal(anchorFromRange(content, 8, 5), null);
   assert.equal(anchorFromRange(content, -1, 2), null);
-  assert.equal(anchorFromRange(content, 0, content.length + 1), null);
   assert.equal(anchorFromRange(content, 1.5, 3), null);
   assert.equal(anchorFromRange(content, 3, 3), null);
+
+  // Text inserted before the selection: the same content moves, context still
+  // identifies a single occurrence, and it is reported as moved (not silently used).
   const moved = `前言。${content}`;
-  const relocated = relocateAnchor(moved, anchor);
-  assert.equal(relocated.start, 7);
-  assert.equal(relocated.text, "第二段");
-  assert.equal(relocateAnchor("完全不同的正文", anchor), null);
+  const movedResolution = resolveAnchor(moved, anchor);
+  assert.equal(movedResolution.status, "unique");
+  assert.equal(movedResolution.anchor.start, 7);
+
+  // Two identical lines: the stored context must pick the right one; without a
+  // discriminating context the answer is "ambiguous", never the first match.
+  const dialogue = "他说：走吧。\n她说：不。\n他说：走吧。\n";
+  const second = dialogue.lastIndexOf("走吧");
+  const secondAnchor = anchorFromRange(dialogue, second, second + 2);
+  assert.equal(anchorValid(dialogue, secondAnchor), true);
+  const movedDialogue = `（新增开场。）\n${dialogue}`;
+  const dialogueResolution = resolveAnchor(movedDialogue, secondAnchor);
+  assert.equal(dialogueResolution.status, "unique");
+  assert.equal(dialogueResolution.anchor.start, second + 8, "the context keeps the second line, not the first");
+
+  // An anchor whose text appears twice and whose stored context matches neither:
+  // reported as ambiguous, never resolved to the first occurrence.
+  const ambiguousAnchor = { start: 1, end: 3, text: "走吧", prefix: "之前。", suffix: "之后。" };
+  const ambiguous = resolveAnchor("走吧。走吧。", ambiguousAnchor);
+  assert.equal(ambiguous.status, "ambiguous");
+  assert.equal(ambiguous.count, 2);
+  assert.equal(resolveAnchor("完全不同的正文", anchor).status, "missing");
   assert.equal(contentHash("abc"), contentHash("abc"));
   assert.notEqual(contentHash("abc"), contentHash("abd"));
 });
@@ -67,8 +88,14 @@ test("adoption modes apply, dedupe repeats, and refuse to overwrite edited conte
   assert.deepEqual(adoptTextProposal(content, selectionProposal, "insert-after"), { content: "开头。中间需要润色。\n\n中间已被润色。结尾。", changed: true });
   assert.deepEqual(adoptTextProposal(content, selectionProposal, "insert-before"), { content: "开头。中间已被润色。\n\n中间需要润色。结尾。", changed: true });
   const edited = content.replace("中间需要润色", "中间已被作者重写");
-  assert.match(adoptTextProposal(edited, selectionProposal, "replace-selection").error, /找不到原来的选中位置/);
-  assert.deepEqual(adoptTextProposal("开头。中间需要润色。结尾。\n\n后记。", selectionProposal, "replace-selection"), { content: "开头。中间已被润色。结尾。\n\n后记。", changed: true });
+  assert.match(adoptTextProposal(edited, selectionProposal, "replace-selection").error, /找不到原来的选中内容/);
+  // Same content moved elsewhere: refused unless the author confirms the new place.
+  const shifted = `前言。${content}`;
+  assert.match(adoptTextProposal(shifted, selectionProposal, "replace-selection").error, /位置已变化/);
+  assert.deepEqual(adoptTextProposal(shifted, selectionProposal, "replace-selection", { allowRelocated: true }), { content: `前言。开头。中间已被润色。结尾。`, changed: true });
+  // Two identical lines and no context match: always refused, never the first one.
+  const repeated = makeTextProposal({ bookId: "bk", target: { moduleId: "chapters", entityId: "c1" }, targetLabel: "章节正文", content: "走吧。走吧。", after: "离开。", scope: "selection", anchor: { start: 5, end: 7, text: "走吧", prefix: "之前。", suffix: "之后。" }, baseRevision: 1, threadKey: "k", id: "p-repeat" });
+  assert.match(adoptTextProposal("走吧。走吧。", repeated, "replace-selection").error, /2 处相同内容/);
   assert.match(adoptTextProposal(content, { ...selectionProposal, status: "adopted" }, "replace-selection").error, /已经处理过/);
   assert.equal(ADOPT_MODE_LABELS["replace-selection"], "替换选中内容");
 });
@@ -83,9 +110,9 @@ test("pending proposals stay scoped to their own target", () => {
 });
 
 test("author can adopt a single event field change and nothing else moves", () => {
-  const ops = parseRoadmapOps(JSON.stringify({ ops: [{ op: "updateEvent", eventId: "e2", fields: { note: "代价是忘记妹妹的生日", order: 2 } }] }), roadmap);
-  assert.ok(Array.isArray(ops));
-  const result = applyRoadmapOps(roadmap, ops);
+  const parsed = parseRoadmapOps(JSON.stringify({ ops: [{ op: "updateEvent", eventId: "e2", fields: { note: "代价是忘记妹妹的生日", order: 2 } }] }), roadmap);
+  assert.ok(!("error" in parsed));
+  const result = applyRoadmapOps(roadmap, parsed.ops);
   assert.ok(!("error" in result));
   const updated = result.roadmap.events.find((event) => event.id === "e2");
   assert.equal(updated.note, "代价是忘记妹妹的生日");
@@ -99,16 +126,18 @@ test("unknown ids, missing fields and non-JSON output keep the original roadmap"
   assert.match(parseRoadmapOps("不是JSON", roadmap).error, /可解析/);
   assert.match(parseRoadmapOps(JSON.stringify({ ops: [{ op: "updateEvent", eventId: "missing", fields: { title: "x" } }] }), roadmap).error, /不存在的事件/);
   assert.match(parseRoadmapOps(JSON.stringify({ ops: [{ op: "updateEvent", eventId: "e1", fields: { id: "hacked", status: "done-ish" } }] }), roadmap).error, /可用的字段/);
-  assert.match(parseRoadmapOps(JSON.stringify({ ops: [{ op: "addEvent", event: { title: "新事件" }, lineIds: ["ghost"] }] }), roadmap).error, /已有的故事线/);
-  assert.deepEqual(parseRoadmapOps(JSON.stringify({ ops: [] }), roadmap), [], "an empty op list is a valid 'no change needed' answer");
+  assert.match(parseRoadmapOps(JSON.stringify({ ops: [{ op: "addEvent", event: { title: "新事件" }, lineIds: ["ghost"] }] }), roadmap).error, /不存在的故事线/);
+  assert.deepEqual(parseRoadmapOps(JSON.stringify({ ops: [] }), roadmap).ops, [], "an empty op list is a valid 'no change needed' answer");
   assert.match(parseRoadmapOps(JSON.stringify({ ops: "nope" }), roadmap).error, /结构不正确/);
   assert.deepEqual(applyRoadmapOps(roadmap, []), { error: "没有可采纳的修改。" });
   const filtered = parseRoadmapOps(JSON.stringify({ ops: [{ op: "updateEvent", eventId: "e1", fields: { title: "改名", id: "hacked", status: "done" } }] }), roadmap);
-  assert.deepEqual(filtered, [{ op: "updateEvent", eventId: "e1", fields: { title: "改名", status: "done" } }], "ids and unknown fields are dropped, allowed fields stay");
+  assert.deepEqual(filtered.ops, [{ op: "updateEvent", eventId: "e1", fields: { title: "改名", status: "done" } }], "ids and unknown fields are dropped, allowed fields stay");
+  assert.deepEqual(filtered.progressEventIds, ["e1"], "a status change is reported so the author can confirm it separately");
+  assert.ok(filtered.warnings.some((warning) => warning.includes("不支持的字段")));
 });
 
 test("new events must arrive with their storyline so no dangling reference remains", () => {
-  const ops = parseRoadmapOps(JSON.stringify({ ops: [{ op: "addEvent", event: { id: "e3", title: "真相", note: "两线交汇", order: 3, chapter: "9-12" }, lineIds: ["main-a", "branch-a"] }] }), roadmap);
+  const ops = parseRoadmapOps(JSON.stringify({ ops: [{ op: "addEvent", event: { id: "e3", title: "真相", note: "两线交汇", order: 3, chapter: "9-12" }, lineIds: ["main-a", "branch-a"] }] }), roadmap).ops;
   const result = applyRoadmapOps(roadmap, ops);
   assert.ok(!("error" in result));
   assert.deepEqual(result.roadmap.lines.map((line) => line.eventIds), [["e1", "e2", "e3"], ["e1", "e2", "e3"]]);
@@ -181,14 +210,16 @@ test("the context panel lists what the model actually receives and respects lock
   assert.equal(context.targetLabel, "章节正文 / 第 1 章");
   assert.deepEqual(context.locked, ["full"]);
   const labels = context.sections.map((section) => section.label);
-  assert.deepEqual(labels, ["当前目标", "作者锁定", "当前内容", "相关设定", "剧情事件", "相关前文", "讨论摘要", "借鉴资料"]);
+  assert.deepEqual(labels, ["当前目标", "作者锁定", "当前内容", "作者选中内容", "相关设定", "剧情事件", "相关前文", "讨论摘要", "待采纳候选", "借鉴资料"]);
   assert.equal(context.sections.find((section) => section.label === "作者锁定").included, true);
   assert.match(context.sections.find((section) => section.label === "相关设定").detail, /世界观/);
-  assert.equal(context.sections.find((section) => section.label === "剧情事件").detail, "妹妹失踪");
+  assert.equal(context.sections.find((section) => section.label === "剧情事件").detail, "本章推进目标：妹妹失踪");
   assert.equal(context.sections.find((section) => section.label === "相关前文").detail, "本章是开篇，没有前文");
   assert.equal(context.sections.find((section) => section.label === "相关前文").included, false);
   assert.equal(context.sections.find((section) => section.label === "借鉴资料").included, true);
-  assert.equal(context.text, "林晚站在雨中。");
+  assert.ok(context.text.includes("林晚站在雨中。"), "the assembled packet carries the current content");
+  assert.ok(context.text.includes("【当前内容】"));
+  assert.equal(context.references.length, 1, "only this module's references are sent");
   assert.match(context.discussionSummary, /写得更冷一些/);
   assert.equal(context.referenceScope, "plot");
 

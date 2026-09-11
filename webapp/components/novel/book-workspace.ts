@@ -1,10 +1,11 @@
 import type { BookProject } from "./bookshelf";
 import type { ReferenceItem } from "./reference-library-dialog";
 import { getRoadmap, worldlineContext, type StoryRoadmap } from "@/lib/story-roadmap";
-import { normalizeLocks, normalizeProposals, normalizeThreads, normalizeView, type CoProposalRecord, type CoThreads, type LockMap } from "@/lib/co-creation";
+import { normalizeLocks, normalizeProposals, normalizeThreads, normalizeView, type CoProposalRecord, type CoThreads, type ContextPacket, type LockMap } from "@/lib/co-creation";
 
 export type StoryMessage = { role: "ai" | "user"; text: string };
-export type PlotGenerationOptions = { messages?: StoryMessage[]; context?: string };
+// A context packet, when present, is the exact payload sent to the model.
+export type PlotGenerationOptions = { messages?: StoryMessage[]; context?: string; packet?: ContextPacket };
 export type PlotProposal = { summary: string; nodes: Array<{ title: string; chapter: string; note: string }>; branches: PlotBranch[]; roadmap?: StoryRoadmap };
 
 export type PlotBranch = {

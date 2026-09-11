@@ -27,7 +27,8 @@ import { desktopBridge } from "@/lib/desktop-bridge";
 import { writingGuidance } from "@/lib/writing-guidance";
 import { defaultChoice, readModelChoice, readSessionCredentials, saveModelChoice, saveSessionCredentials, type ModelChoice, type SessionCredentials } from "@/lib/model-credentials";
 import { CUSTOM_PROVIDER_ID, DEFAULT_PROVIDER_ID, PROVIDERS, providerById, shortModelLabel, validModelName } from "@/lib/model-providers";
-import { type CoTarget } from "@/lib/co-creation";
+import { applyProposalTransaction } from "@/lib/co-creation";
+import type { AdoptOptions, AdoptOutcome } from "@/components/novel/co-creation-panel";
 
 const navGroups = [
   { label: "故事设计", items: [
@@ -225,17 +226,52 @@ export default function Home() {
     notify(`已删除借鉴：${reference.title}`);
   }
 
+  const workspacesRef = useRef(workspaces);
+  useEffect(() => { workspacesRef.current = workspaces; }, [workspaces]);
+
+  // Every adoption runs one transaction against the latest state and lands as a
+  // single update; a failure never marks the candidate as adopted.
+  function adoptProposal(proposalId: string, options: AdoptOptions): AdoptOutcome {
+    const latest = mergeBookWorkspace(currentBook, workspacesRef.current[currentBook.id]);
+    const outcome = applyProposalTransaction({
+      bookId: currentBook.id,
+      workspace: latest,
+      proposalId,
+      ...(options.mode ? { mode: options.mode } : {}),
+      ...(options.opIndexes ? { acceptedOpIndexes: options.opIndexes } : {}),
+      ...(options.allowRelocatedAnchor ? { allowRelocatedAnchor: true } : {}),
+      ...(options.confirmProgress ? { confirmProgress: true } : {}),
+      snapshot: withSnapshot,
+    });
+    if ("error" in outcome) {
+      return {
+        ok: false, error: outcome.error,
+        ...(outcome.needsConfirmation ? { needsConfirmation: outcome.needsConfirmation } : {}),
+        ...(outcome.relocation ? { relocation: outcome.relocation } : {}),
+      };
+    }
+    setWorkspaces((items) => ({ ...items, [currentBook.id]: outcome.workspace }));
+    setBooks((items) => items.map((book) => book.id === currentBook.id ? { ...book, updatedAt: new Date().toISOString() } : book));
+    return { ok: true, note: outcome.note };
+  }
+
   async function askAI(prompt: string, task = "chat", options?: PlotGenerationOptions) {
     if (requestController.current) throw new Error("已有生成任务，请等待完成或停止后重试。");
     const controller = new AbortController();
     requestController.current = controller;
     setAiError(""); setGenerating(true);
     try {
+      // A context packet is the single source for both the panel preview and the
+      // request payload; without one we fall back to the whole-book context.
+      const context = options?.packet
+        ? options.packet.text
+        : [options?.context?.slice(0, 60000), buildStoryContext(currentBook, workspace, active).slice(0, options?.context ? 59000 : 120000)].filter(Boolean).join("\n\n");
+      const packetReferences = options?.packet?.references ?? references.slice(-12).map((r) => ({ title: r.title.slice(0, 500), kind: r.kind.slice(0, 100), summary: r.summary.slice(0, 12000) }));
       const response = await fetch("/api/generate", {
         method: "POST", headers: { "Content-Type": "application/json", ...(credentials ? { "X-Momai-API-Key": credentials.key } : {}) },
-        body: JSON.stringify({ task, prompt, provider: choice.provider, model: choice.model, ...(choice.provider === CUSTOM_PROVIDER_ID && choice.baseUrl ? { baseUrl: choice.baseUrl } : {}), context: [options?.context?.slice(0, 60000), buildStoryContext(currentBook, workspace, active).slice(0, options?.context ? 59000 : 120000)].filter(Boolean).join("\n\n"),
+        body: JSON.stringify({ task, prompt, provider: choice.provider, model: choice.model, ...(choice.provider === CUSTOM_PROVIDER_ID && choice.baseUrl ? { baseUrl: choice.baseUrl } : {}), context,
           messages: (options?.messages ?? messages).slice(-20).map((m) => ({ ...m, text: m.text.slice(-12000) })),
-          references: references.slice(-12).map((r) => ({ title: r.title.slice(0, 500), kind: r.kind.slice(0, 100), summary: r.summary.slice(0, 12000) })),
+          references: packetReferences,
         }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(190000)]),
       });
       const data = await response.json() as { content?: string; error?: string; truncated?: boolean };
@@ -392,7 +428,7 @@ export default function Home() {
           <div className="module-tools"><span>创作工作区 / {currentLabel}</span><div><Button variant="outline" size="sm" onClick={() => setVersionsOpen(true)}><Clock3 />故事版本</Button>{active !== "timeline" && active !== "references" && <Button variant="outline" size="sm" aria-expanded={assistantVisible} onClick={() => setRightOpen(!assistantVisible)}><MessageCircleMore />{assistantVisible ? "收起共创助手" : "共创助手"}</Button>}</div></div>
           {generating && active !== "timeline" && <div className="module-task-status" role="status"><LoaderCircle className="spin" /><span>AI 正在生成，请稍候…</span><Button size="sm" variant="outline" onClick={() => requestController.current?.abort()}>停止生成</Button></div>}
           {aiError && active !== "timeline" && <p className="ai-error" role="alert">{aiError}</p>}
-          {active === "timeline" ? <WorldlineWorkbench key={currentBook.id} book={currentBook} workspace={workspace} busy={generating} saveState={saveState} onWorkspaceChange={updateWorkspace} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : active === "references" ? <ReferenceWorkbench title={currentBook.title} references={references} onAdd={openReferences} onRemove={removeReference} /> : active !== "overview" ? <AssetWorkbench key={`${currentBook.id}-${active}-${workspace.activeChapterId}`} book={currentBook} type={active} workspace={workspace} busy={generating} saveState={saveState} references={references} onWorkspaceChange={updateWorkspace} onContentChange={(content, snapshot) => updateWorkspace((w) => changeAsset(w, active, content, snapshot))} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : <>
+          {active === "timeline" ? <WorldlineWorkbench key={currentBook.id} book={currentBook} workspace={workspace} busy={generating} saveState={saveState} connection={connection} onWorkspaceChange={updateWorkspace} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : active === "references" ? <ReferenceWorkbench title={currentBook.title} references={references} onAdd={openReferences} onRemove={removeReference} /> : active !== "overview" ? <AssetWorkbench key={`${currentBook.id}-${active}-${workspace.activeChapterId}`} book={currentBook} type={active} workspace={workspace} busy={generating} saveState={saveState} connection={connection} references={references} onWorkspaceChange={updateWorkspace} onContentChange={(content, snapshot) => updateWorkspace((w) => changeAsset(w, active, content, snapshot))} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : <>
           <div className="page-heading">
             <div><div className="eyebrow">{currentBook.title} / {currentLabel}</div><h1>故事蓝图</h1><p>确定故事构想、核心卖点和创作偏好。</p></div>
 
@@ -411,14 +447,11 @@ export default function Home() {
               workspace={workspace}
               target={{ moduleId: "overview" }}
               busy={generating}
-              connection={connection}
+              modelConnection={connection}
+              saveState={saveState}
               onWorkspaceChange={updateWorkspace}
               onGenerate={askAI}
-              onApplyText={(_target: CoTarget, content: string, label: string) => {
-                updateWorkspace((w) => ({ ...withSnapshot(w, label), idea: content }));
-                setBooks((items) => items.map((book) => book.id === currentBook.id ? { ...book, premise: content } : book));
-              }}
-              onApplyRoadmap={() => notify("世界线修改请在世界线中采纳")}
+              onAdopt={adoptProposal}
               onCancel={() => requestController.current?.abort()}
               onNotify={notify}
               onOpenReferences={openReferences}

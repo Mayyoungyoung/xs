@@ -193,7 +193,7 @@ test("roadmap candidates are validated, previewed as dashed changes and adopted 
   await generate();
   assert.equal((await saved()).workspaces["chang-an"].plot.roadmap.events[0].note, "女史官发现一段不存在的登基记录。", "candidates never touch the official roadmap before adoption");
   assert.ok(document.querySelector(".roadmap-event.has-candidate"), "the canvas marks the event a candidate would change");
-  await click(buttons("采纳这些修改")[0]);
+  await click(buttons("采纳选中的修改")[0]);
   const adopted = await saved();
   assert.equal(adopted.workspaces["chang-an"].plot.roadmap.events[0].note, "起居注被改写了三次，每次都在掩盖同一个名字。");
   assert.equal(adopted.workspaces["chang-an"].plot.roadmap.events[0].id, eventId, "adoption never renumbers stable ids");

@@ -9,15 +9,17 @@ import { RoadmapWorkbench } from "./roadmap-workbench";
 import { PlotCopilot } from "./plot-copilot";
 import { CoCreationPanel } from "./co-creation-panel";
 import { changeAsset, withSnapshot, type BookWorkspace, type PlotGenerationOptions, type PlotState } from "./book-workspace";
-import { getRoadmap, type StoryRoadmap } from "@/lib/story-roadmap";
+import { getRoadmap } from "@/lib/story-roadmap";
 import { describeRoadmapOp, isRoadmapProposal, targetLabelFor, type CoTarget } from "@/lib/co-creation";
 import type { BookProject } from "./bookshelf";
 import type { ReferenceItem, ReferenceScope } from "./reference-library-dialog";
+import type { AdoptOptions, AdoptOutcome } from "./co-creation-panel";
 
 type Props = {
-  book: BookProject; workspace: BookWorkspace; busy: boolean; saveState: string;
+  book: BookProject; workspace: BookWorkspace; busy: boolean; saveState: string; connection: string;
   onWorkspaceChange: (change: Partial<BookWorkspace> | ((current: BookWorkspace) => BookWorkspace)) => void;
   onGenerate: (prompt: string, task: string, options?: PlotGenerationOptions) => Promise<string>;
+  onAdopt: (proposalId: string, options: AdoptOptions) => AdoptOutcome;
   onOpenReferences: (scope: ReferenceScope) => void; onRemoveReference: (reference: ReferenceItem) => void;
   onCancel: () => void; onNotify: (message: string) => void;
 };
@@ -26,7 +28,7 @@ const views = [
   { id: "discussion", label: "AI 主线共创", icon: MessageCircle },
 ] as const;
 
-export function WorldlineWorkbench({ book, workspace, busy, saveState, onWorkspaceChange, onGenerate, onOpenReferences, onRemoveReference, onCancel, onNotify }: Props) {
+export function WorldlineWorkbench({ book, workspace, busy, saveState, connection, onWorkspaceChange, onGenerate, onAdopt, onOpenReferences, onRemoveReference, onCancel, onNotify }: Props) {
   const [view, setView] = useState<(typeof views)[number]["id"]>("graph");
   const [target, setTarget] = useState<CoTarget | null>(null);
   const roadmap = useMemo(() => getRoadmap(workspace.plot), [workspace.plot]);
@@ -47,27 +49,6 @@ export function WorldlineWorkbench({ book, workspace, busy, saveState, onWorkspa
     onWorkspaceChange((current) => {
       const plot = typeof change === "function" ? change(current.plot) : change;
       return { ...(plot.version !== current.plot.version ? withSnapshot(current, "世界线修改前") : current), plot };
-    });
-  }
-
-  // Adopted candidates land as one transaction with one snapshot, and only the
-  // fields the model was allowed to touch move.
-  function applyRoadmap(next: StoryRoadmap, label: string) {
-    onWorkspaceChange((current) => ({ ...withSnapshot(current, label), plot: { ...current.plot, roadmap: next, version: current.plot.version + 1 } }));
-  }
-  function applyTargetText(applyTo: CoTarget, content: string, label: string) {
-    onWorkspaceChange((current) => {
-      const currentRoadmap = getRoadmap(current.plot);
-      if (applyTo.moduleId === "event" && applyTo.entityId) {
-        if (!currentRoadmap.events.some((event) => event.id === applyTo.entityId)) return current;
-        return { ...withSnapshot(current, label), plot: { ...current.plot, version: current.plot.version + 1, roadmap: { ...currentRoadmap, events: currentRoadmap.events.map((event) => event.id === applyTo.entityId ? { ...event, note: content } : event) } } };
-      }
-      if (applyTo.moduleId === "line" && applyTo.entityId) {
-        if (!currentRoadmap.lines.some((line) => line.id === applyTo.entityId)) return current;
-        return { ...withSnapshot(current, label), plot: { ...current.plot, version: current.plot.version + 1, roadmap: { ...currentRoadmap, lines: currentRoadmap.lines.map((line) => line.id === applyTo.entityId ? { ...line, goal: content } : line) } } };
-      }
-      if (applyTo.moduleId === "timeline") return changeAsset(withSnapshot(current, label), "timeline", content);
-      return current;
     });
   }
 
@@ -107,11 +88,11 @@ export function WorldlineWorkbench({ book, workspace, busy, saveState, onWorkspa
             workspace={workspace}
             target={detailTarget}
             busy={busy}
-            connection={saveState}
+            modelConnection={connection}
+            saveState={saveState}
             onWorkspaceChange={onWorkspaceChange}
             onGenerate={onGenerate}
-            onApplyText={applyTargetText}
-            onApplyRoadmap={applyRoadmap}
+            onAdopt={onAdopt}
             onCancel={onCancel}
             onNotify={onNotify}
             onOpenReferences={onOpenReferences}

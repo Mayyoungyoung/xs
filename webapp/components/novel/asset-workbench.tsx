@@ -5,25 +5,27 @@ import { BookMarked, BookOpen, Box, Check, CircleUserRound, Clock3, Download, Fe
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
-import { applyChapterText, changeAsset, withSnapshot, type BookWorkspace, type PlotGenerationOptions } from "./book-workspace";
+import { withSnapshot, type BookWorkspace, type PlotGenerationOptions } from "./book-workspace";
 import { writingGuidance } from "@/lib/writing-guidance";
 import { downloadText, wordCount } from "@/lib/novel-data";
 import type { BookProject } from "./bookshelf";
 import type { ReferenceItem, ReferenceScope } from "./reference-library-dialog";
 import { ChapterRoadmap } from "./chapter-roadmap";
-import { chapterPlan } from "@/lib/story-roadmap";
 import { anchorFromRange, type CoModuleId, type CoTarget, type TextAnchor } from "@/lib/co-creation";
+import type { AdoptOptions, AdoptOutcome } from "./co-creation-panel";
 import { CoCreationPanel } from "./co-creation-panel";
 
 type Props = {
   embedded?: boolean;
   book: BookProject; type: string; workspace: BookWorkspace; busy: boolean; saveState: string;
+  connection: string;
   references: ReferenceItem[];
   onContentChange: (content: string, snapshot?: boolean) => void;
   onWorkspaceChange: (patch: Partial<BookWorkspace> | ((w: BookWorkspace) => BookWorkspace)) => void;
   onOpenReferences: (scope: ReferenceScope) => void;
   onRemoveReference: (reference: ReferenceItem) => void;
   onGenerate: (prompt: string, task: string, options?: PlotGenerationOptions) => Promise<string>;
+  onAdopt: (proposalId: string, options: AdoptOptions) => AdoptOutcome;
   onCancel: () => void;
   onNotify: (message: string) => void;
 };
@@ -38,12 +40,14 @@ const configs: Record<string, { title: string; desc: string; icon: typeof Box; s
   outline: { title: "卷章大纲", desc: "把主支线落实为章节冲突、转折与钩子。", icon: Library, scope: "plot", task: "outline_design" },
   chapters: { title: "章节正文", desc: "按章节写作，参考设定和前文，预览后采纳生成内容。", icon: BookOpen, scope: "plot", task: "chapter_write" },
 };
-export function AssetWorkbench({ embedded = false, book, type, workspace, busy, saveState, references, onContentChange, onWorkspaceChange, onOpenReferences, onRemoveReference, onGenerate, onCancel, onNotify }: Props) {
+export function AssetWorkbench({ embedded = false, book, type, workspace, busy, saveState, connection, references, onContentChange, onWorkspaceChange, onOpenReferences, onRemoveReference, onGenerate, onAdopt, onCancel, onNotify }: Props) {
   const config = configs[type] ?? configs.world;
   const Icon = config.icon;
   const [savingLocal, setSavingLocal] = useState(false);
   const [error, setError] = useState("");
   const [selection, setSelection] = useState<TextAnchor | null>(null);
+  const [polishRun, setPolishRun] = useState<{ id: number; instruction: string; task?: string } | null>(null);
+  const polishCounter = useRef(0);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const guidance = writingGuidance(type, book, workspace);
   const chapter = workspace.chapters.find((c) => c.id === workspace.activeChapterId) ?? workspace.chapters[0];
@@ -60,15 +64,13 @@ export function AssetWorkbench({ embedded = false, book, type, workspace, busy, 
     setSelection(anchorFromRange(field.value, field.selectionStart ?? 0, field.selectionEnd ?? 0));
   }
 
-  // Chapter generation still binds the recommended events before asking, and
-  // every AI request goes through the shared co-creation panel.
-  async function generate(prompt: string, task: string, options?: PlotGenerationOptions) {
-    if (type === "chapters") {
-      const plan = chapterPlan(workspace);
-      if (plan.missing.length) throw new Error("本章绑定的事件已不存在，请重新选择推进事件。");
-      if (plan.roadmap.lines.length && !plan.manual) onWorkspaceChange((current) => ({ ...current, chapters: current.chapters.map((item) => item.id === chapter.id ? { ...item, plotEventIds: plan.ids } : item) }));
-    }
-    return onGenerate(prompt, task, options);
+  // Polish, continue and local rewrite all go through the co-creation panel, so
+  // every AI result becomes a candidate bound to this chapter. Generating never
+  // writes the chapter's recommended event binding: that stays the author's
+  // explicit confirmation in the chapter roadmap.
+  function requestPolish() {
+    polishCounter.current += 1;
+    setPolishRun({ id: polishCounter.current, instruction: "", task: "chapter_polish" });
   }
 
   async function reviewChapter() {
@@ -79,17 +81,6 @@ export function AssetWorkbench({ embedded = false, book, type, workspace, busy, 
       setReview(result);
       onNotify("审查完成，正文保持原样");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "生成失败，请重试。"); }
-  }
-
-  // One restorable snapshot per adoption, written to the proposal's own target
-  // (so a late response never lands in a chapter the author switched to).
-  function applyTargetText(applyTo: CoTarget, content: string, label: string) {
-    if (applyTo.moduleId === "chapters" && !workspace.chapters.some((item) => item.id === applyTo.entityId)) { onNotify("目标章节已不存在，候选稿未写入"); return; }
-    onWorkspaceChange((current) => {
-      if (applyTo.moduleId === "chapters") return applyChapterText(current, applyTo.entityId!, content, label);
-      if (applyTo.moduleId === "overview") return { ...withSnapshot(current, label), idea: content };
-      return changeAsset(current, applyTo.moduleId, content, true, label);
-    });
   }
 
   function addChapter() {
@@ -134,7 +125,7 @@ export function AssetWorkbench({ embedded = false, book, type, workspace, busy, 
         <footer><span><Check />{saveState}</span><span>{wordCount(editorContent).toLocaleString()} 字</span></footer>
       </div>
       {error && <p className="ai-error" role="alert">{error}</p>}
-      {type === "chapters" && <div className="chapter-ai-actions"><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void generate("润色当前完整章节，保留剧情事实，只输出完整正文。", "chapter_polish")}>润色本章</Button><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void reviewChapter()}>连续性检查</Button></div>}
+      {type === "chapters" && <div className="chapter-ai-actions"><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={requestPolish}>润色本章</Button><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void reviewChapter()}>连续性检查</Button></div>}
       {review && <section className="generation-preview"><h2>连续性审查</h2><div className="review-text">{review}</div><Button variant="outline" onClick={() => downloadText(review, `${book.title}-${chapter.title}-审查.md`)}>导出审查</Button></section>}
     </div><aside className="asset-side">
       <CoCreationPanel
@@ -142,17 +133,18 @@ export function AssetWorkbench({ embedded = false, book, type, workspace, busy, 
         workspace={workspace}
         target={target}
         busy={busy}
-        connection={saveState}
+        modelConnection={connection}
+        saveState={saveState}
         selection={selection}
         onWorkspaceChange={onWorkspaceChange}
-        onGenerate={generate}
-        onApplyText={applyTargetText}
-        onApplyRoadmap={() => onNotify("剧情修改请在世界线中采纳")}
+        onGenerate={onGenerate}
+        onAdopt={onAdopt}
         onCancel={onCancel}
         onNotify={onNotify}
         onOpenReferences={onOpenReferences}
         onRemoveReference={onRemoveReference}
         onFocusEditor={() => editorRef.current?.focus()}
+        externalRun={polishRun}
       />
       <section className="asset-reference-card"><header><strong>本页借鉴</strong><button onClick={() => onOpenReferences(config.scope)}><Plus />添加</button></header>{scopedReferences.length === 0 ? <div className="asset-no-reference"><BookMarked /><p>尚未选择借鉴资料</p></div> : scopedReferences.map((item) => <div className="asset-reference-row" key={`${item.id}-${item.scope}`}><div><strong>{item.title}</strong><small>{item.source}</small></div><button className="remove-reference" onClick={() => onRemoveReference(item)} aria-label={`删除借鉴 ${item.title}`}><Trash2 /></button></div>)}</section>
       <section className="asset-version-card"><strong>版本记录 · 最近 30 次</strong>{versions.length === 0 && <p>保存快照或采纳生成内容后，可在此恢复。</p>}{versions.map((version) => <div key={version.id}><Save /><span>{version.label}<small>{version.createdAt}</small></span><Button variant="outline" size="sm" onClick={() => { onContentChange(version.content, true); onNotify("已恢复，恢复前内容已备份"); }}>恢复</Button></div>)}</section>

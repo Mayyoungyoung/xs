@@ -10,7 +10,8 @@ import { roadmapSchema } from "@/lib/roadmap-schema";
 import { buildStoryGraph, layoutStoryLanes, selectVisibleStoryGraph, sharedEventHint, unboundEventWarnings, type StoryGraph } from "@/lib/story-graph";
 import type { Chapter, PlotState } from "./book-workspace";
 
-type Editor = { kind: "line"; line: Storyline; fresh: boolean } | { kind: "event"; event: RoadmapEvent; lineId: string; fresh: boolean } | { kind: "join"; lineId: string; eventId: string };
+type EditorBase = { kind: "line"; id: string; title: string; goal: string } | { kind: "event"; id: string; title: string; note: string; chapter: string; order: number; status: string };
+type Editor = { kind: "line"; line: Storyline; fresh: boolean; base?: EditorBase } | { kind: "event"; event: RoadmapEvent; lineId: string; fresh: boolean; base?: EditorBase } | { kind: "join"; lineId: string; eventId: string; base?: EditorBase };
 type PendingPreview = { id: string; targetLabel: string; descriptions: string[]; eventIds: string[] };
 type Props = {
   state: PlotState; chapters: Chapter[]; busy: boolean;
@@ -23,12 +24,15 @@ type Props = {
   onViewChange?: (view: { x: number; y: number; lod: number }) => void;
 };
 
-// Zoom decides how much each node shows; thresholds are wide enough that the
-// canvas does not flicker between levels near a boundary.
-function lodFor(zoom: number, previous?: number): 0 | 1 | 2 {
-  if (previous === 0) return zoom > .62 ? 1 : 0;
-  if (previous === 1) return zoom < .5 ? 0 : zoom > .98 ? 2 : 1;
-  return zoom < .86 ? 1 : 2;
+// Zoom decides how much each node shows. The level is derived from the zoom in
+// one step (so "fit whole book" lands on the right level immediately), with a
+// hysteresis band only near the thresholds so it cannot flicker.
+function lodFor(zoom: number, previous?: 0 | 1 | 2): 0 | 1 | 2 {
+  const far = previous === 0 ? .58 : .5;
+  const near = previous === 2 ? .9 : .98;
+  if (zoom < far) return 0;
+  if (zoom > near) return 2;
+  return 1;
 }
 
 export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, onSelect, pendingPreview = [], currentChapterId, view, onViewChange }: Props) {
@@ -51,7 +55,9 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
   const candidateEvents = useMemo(() => new Set(pendingPreview.flatMap((preview) => preview.eventIds)), [pendingPreview]);
   const dimmedEvents = useMemo(() => new Set(visible.nodes.filter((node) => node.dimmed).map((node) => node.event.id)), [visible]);
 
-  useEffect(() => { editorElement.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }, [editorId, editor?.kind]);
+  // Selecting a node must not throw the author out of the canvas or scroll the
+  // page away, so the inspector stays where it is.
+  useEffect(() => { editorElement.current?.focus?.({ preventScroll: true }); }, [editorId, editor?.kind]);
   useEffect(() => { if (!expanded) return; const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setExpanded(false); }; window.addEventListener("keydown", escape); return () => window.removeEventListener("keydown", escape); }, [expanded]);
 
   function setZoom(value: number) {
@@ -62,21 +68,25 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
   function fit() { setZoom(Math.min(1, (viewport.current?.clientWidth || 780) / layout.width)); viewport.current?.scrollTo({ top: 0, left: 0 }); }
   function locateCurrentChapter() {
     if (!currentChapterId) return;
-    const column = graph.columns.find((item) => item.chapterId === currentChapterId);
-    if (!column) return;
-    const start = layout.columnStarts[column.id] ?? 0;
-    viewport.current?.scrollTo({ left: Math.max(0, start * zoom - 40), behavior: "smooth" });
+    const zone = layout.zones.find((item) => item.chapterId === currentChapterId);
+    if (!zone) return;
+    viewport.current?.scrollTo({ left: Math.max(0, zone.x * zoom - 40), behavior: "smooth" });
   }
   function toggleCollapse(lineId: string) { setCollapsed((current) => current.includes(lineId) ? current.filter((id) => id !== lineId) : [...current, lineId]); }
 
   // Viewport memory is a per-book preference: scroll position and detail level
   // are saved when the interaction ends. Zoom stays in plot.zoom, so restoring a
   // view can never overwrite the author's zoom choice.
+  const viewTimer = useRef<number | undefined>(undefined);
   function rememberView() {
     const element = viewport.current;
     if (!element || !onViewChange) return;
-    onViewChange({ x: element.scrollLeft, y: element.scrollTop, lod });
+    window.clearTimeout(viewTimer.current);
+    viewTimer.current = window.setTimeout(() => {
+      onViewChange({ x: element.scrollLeft, y: element.scrollTop, lod });
+    }, 400);
   }
+  useEffect(() => () => window.clearTimeout(viewTimer.current), []);
   useEffect(() => {
     if (!view || !viewport.current || viewport.current.dataset.restored) return;
     viewport.current.dataset.restored = "1";
@@ -85,7 +95,18 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
   }, []);
 
   const next = graph.lines.filter((line) => line.kind === "main").flatMap((line) => { const event = eventsForLine(roadmap, line).find((item) => item.status !== "done"); return event ? [`${line.title}：${event.title}`] : []; });
-  function begin(value: Editor) { setExpanded(false); setError(""); setEditor(value); onSelect?.(value.kind === "event" ? { kind: "event", id: value.event.id, lineId: value.lineId } : value.kind === "line" ? { kind: "line", id: value.line.id } : null); }
+  function baseOf(value: Editor): EditorBase | undefined {
+    if (value.kind === "join" || value.fresh) return undefined;
+    if (value.kind === "line") return { kind: "line", id: value.line.id, title: value.line.title, goal: value.line.goal };
+    if (value.kind === "event") return { kind: "event", id: value.event.id, title: value.event.title, note: value.event.note, chapter: value.event.chapter, order: value.event.order, status: value.event.status };
+    return undefined;
+  }
+  function begin(value: Editor) {
+    setError("");
+    const next = { ...value, base: baseOf(value) };
+    setEditor(next);
+    onSelect?.(next.kind === "event" ? { kind: "event", id: next.event.id, lineId: next.lineId } : next.kind === "line" ? { kind: "line", id: next.line.id } : null);
+  }
   function closeEditor() { setEditor(null); onSelect?.(null); }
   function newLine(kind: Storyline["kind"]) {
     begin({ kind: "line", fresh: true, line: { id: crypto.randomUUID(), title: "", goal: "", kind, color: lineColors[roadmap.lines.length % lineColors.length], eventIds: [], ...(kind === "branch" ? { originId: roadmap.events[0]?.id } : {}) } });
@@ -95,8 +116,36 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
     if (!result.success) { setError(result.error.issues[0]?.message ?? "请检查故事线的关联"); return false; }
     onChange((current) => ({ ...current, roadmap: result.data, version: current.version + 1 })); closeEditor(); setError(""); return true;
   }
+  // A draft is only saved when the object it was based on is still current: an
+  // adopted AI change (or another edit) must never be overwritten by a stale form.
+  function staleFields(): string[] {
+    if (!editor?.base) return [];
+    if (editor.base.kind === "event") {
+      const current = roadmap.events.find((event) => event.id === editor.base!.id);
+      if (!current) return ["这个事件已被删除"];
+      const changed: string[] = [];
+      if (current.title !== editor.base.title) changed.push("标题");
+      if (current.note !== editor.base.note) changed.push("说明");
+      if (current.chapter !== editor.base.chapter) changed.push("章节");
+      if (current.status !== editor.base.status) changed.push("进度");
+      if (current.order !== editor.base.order) changed.push("顺序");
+      return changed;
+    }
+    const current = roadmap.lines.find((line) => line.id === editor.base!.id);
+    if (!current) return ["这条故事线已被删除"];
+    const changed: string[] = [];
+    if (current.title !== editor.base.title) changed.push("名称");
+    if (current.goal !== editor.base.goal) changed.push("目标");
+    return changed;
+  }
+
   function save() {
     if (!editor || busy) return;
+    const stale = staleFields();
+    if (stale.length) {
+      setError(`这条内容在编辑期间已被更新（${stale.join("、")}）。请先重新载入正式内容再保存，避免覆盖刚采纳的修改。`);
+      return;
+    }
     if (editor.kind === "line") {
       const line = { ...editor.line, title: editor.line.title.trim(), goal: editor.line.goal.trim() };
       if (!line.title) { setError("请填写故事线名称。"); return; }
@@ -131,7 +180,7 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
       <div><Button disabled={busy || roadmap.lines.length >= 16} onClick={() => newLine("main")}><Plus />添加主线</Button><Button variant="outline" disabled={busy || !roadmap.events.length || roadmap.lines.length >= 16} onClick={() => newLine("branch")}><GitBranch />衍生支线</Button></div>
       <div className="roadmap-view-tools">
         <label className="roadmap-search"><Search /><input aria-label="搜索剧情" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索事件或故事线" /></label>
-        {query && <span className="roadmap-search-count">{visible.matchedEventIds.length} 个匹配</span>}
+        {query && <span className="roadmap-search-count">{visible.matchedEventIds.length} 个匹配{visible.hiddenMatches.length ? ` · 另有 ${visible.hiddenMatches.length} 个在折叠的故事线中` : ""}</span>}
         <Button variant="outline" size="sm" disabled={!currentChapterId} onClick={locateCurrentChapter}><Crosshair />定位当前章节</Button>
         <span className="roadmap-lod" title="缩小看结构与进度，放大看事件细节">{lod === 0 ? <Layers /> : lod === 1 ? <Eye /> : <EyeOff />}{lod === 0 ? "远景" : lod === 1 ? "中景" : "近景"}</span>
         {roadmap.lines.length > 0 && <NativeSelect aria-label="聚焦故事线" value={focus} onChange={(event) => setFocus(event.target.value)}><NativeSelectOption value="all">全部故事线</NativeSelectOption>{roadmap.lines.map((line) => <NativeSelectOption key={line.id} value={line.id}>{line.title}</NativeSelectOption>)}</NativeSelect>}
@@ -141,6 +190,7 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
       <div className="roadmap-summary"><span>{graph.lines.filter((line) => line.kind === "main").length} 条主线</span><span>{graph.lines.filter((line) => line.kind === "branch").length} 条支线</span><span>{graph.sharedCount} 个交汇点</span><span>已写 {graph.doneEvents} / {graph.totalEvents} 个事件</span>{graph.unplannedCount > 0 && <span className="is-pending">{graph.unplannedCount} 个事件待安排章节</span>}</div>
       <p className="roadmap-reading-guide">从左向右推进 · 每行一条故事线 · 相同的交汇事件用竖线连接 · 点击事件编辑</p>
       {warnings.length > 0 && <p className="roadmap-warning" role="status">这些事件的章节文字没有对应的章节绑定，请到「章节正文」重新选择：{warnings.map((warning) => warning.title).join("、")}。</p>}
+      {layout.warnings.length > 0 && <p className="roadmap-warning" role="status">{layout.warnings.join("；")}</p>}
       {pendingPreview.length > 0 && <section className="roadmap-candidates" aria-label="待采纳剧情修改"><header><Layers /><strong>AI 提出了 {pendingPreview.length} 组待采纳修改</strong><span>虚线标记的事件会变化，未采纳前不影响正式剧情</span></header>{pendingPreview.map((preview) => <div key={preview.id}><em>{preview.targetLabel}</em><ul>{preview.descriptions.map((description, index) => <li key={index}>{description}</li>)}</ul></div>)}<Button variant="outline" size="sm" onClick={onDiscuss}>去采纳或拒绝</Button></section>}
       <section className={`roadmap-stage ${expanded ? "is-expanded" : ""}`} aria-label="可缩放路线图">
         <div className="roadmap-zoom-tools"><Button variant="outline" size="icon" aria-label="缩小路线图" disabled={zoom <= .02} onClick={() => setZoom(zoom - .1)}><ZoomOut /></Button><button className="roadmap-zoom-reset" aria-label="路线图恢复原始比例" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button><Button variant="outline" size="icon" aria-label="放大路线图" disabled={zoom >= 2} onClick={() => setZoom(zoom + .1)}><ZoomIn /></Button><Button variant="outline" onClick={fit}><Scan />适应宽度</Button><Button variant="outline" onClick={() => setExpanded(!expanded)}>{expanded ? <X /> : <Maximize2 />}{expanded ? "退出大图" : "展开大图"}</Button><span>横向滚动看后续，放大查看细节</span></div>
@@ -148,13 +198,13 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
           <div style={{ width: layout.width * zoom, height: layout.height * zoom, position: "relative" }}>
             <div className={`roadmap-map ${laneClass}`} style={{ width: layout.width, height: layout.height, transform: `scale(${zoom})`, transformOrigin: "top left" }}>
               <svg className="roadmap-connections" width="100%" height="100%" aria-hidden="true">
-                {lineRows.map(({ line, events }, row) => events.slice(1).map((event, index) => <path key={`${line.id}-${event.id}`} d={`M${layout.positions[events[index].id].x + 95} ${row * layout.laneHeight + 122} H${layout.positions[event.id].x + 95}`} fill="none" stroke={line.color} strokeWidth="2" />))}
-                {graph.events.map((event) => {
+                {lineRows.map(({ line, events }, row) => events.filter((event) => !visible.hiddenEventIds.includes(event.id)).slice(1).map((event, index, shown) => <path key={`${line.id}-${event.id}`} d={`M${layout.positions[shown[index - 1]?.id ?? event.id].x + 95} ${row * layout.laneHeight + 122} H${layout.positions[event.id].x + 95}`} fill="none" stroke={line.color} strokeWidth="2" />))}
+                {graph.events.filter((event) => !visible.hiddenEventIds.includes(event.id)).map((event) => {
                   const rows = lineRows.flatMap(({ line }, index) => line.eventIds.includes(event.id) ? [index] : []);
                   return rows.length > 1 ? <path key={event.id} d={`M${layout.positions[event.id].x + 95} ${rows[0] * layout.laneHeight + 122} V${rows.at(-1)! * layout.laneHeight + 122}`} stroke="#98866f" strokeWidth="2" strokeDasharray="5 5" /> : null;
                 })}
               </svg>
-              {layout.columns.length > 0 && <div className="roadmap-stages" aria-hidden="true">{layout.columns.map((column) => <div key={column.id} className={`roadmap-stage-label ${column.kind === "unplanned" ? "is-unplanned" : ""} ${visible.currentColumnId === column.id ? "is-current" : ""}`} style={{ left: layout.columnStarts[column.id] ?? 0 }}><span>{column.label}</span><em>{column.kind === "unplanned" ? "计划区" : `${column.eventIds.length} 个事件`}{visible.currentColumnId === column.id ? " · 正在写" : ""}</em></div>)}</div>}
+              {layout.zones.length > 0 && <div className="roadmap-stages" aria-hidden="true">{layout.zones.map((zone) => <div key={zone.id} className={`roadmap-zone ${zone.kind === "unplanned" ? "is-unplanned" : ""} ${visible.currentColumnId === zone.id ? "is-current" : ""}`} style={{ left: zone.x, width: zone.width }}><header><span>{zone.label}</span><em>{zone.kind === "unplanned" ? "计划区 · 未安排章节" : `${zone.eventIds.length} 个事件`}{visible.currentColumnId === zone.id ? " · 正在写" : ""}</em></header></div>)}</div>}
               {lineRows.map(({ line }, row) => {
                 const isCollapsed = collapsed.includes(line.id);
                 const dimmed = visible.dimmedLineIds.includes(line.id);
@@ -167,7 +217,7 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
                     {line.originId && <em>起于：{roadmap.events.find((event) => event.id === line.originId)?.title}</em>}
                     <div><button disabled={busy || roadmap.events.length >= 80} onClick={() => begin({ kind: "event", fresh: true, lineId: line.id, event: { id: crypto.randomUUID(), title: "", note: "", chapter: "待安排", order: Math.max(0, ...roadmap.events.map((event) => event.order)) + 1, status: "planned" } })}><Plus />事件</button><button disabled={busy || !roadmap.events.some((event) => !line.eventIds.includes(event.id))} onClick={() => begin({ kind: "join", lineId: line.id, eventId: "" })}><Link2 />交汇</button></div>
                   </div>
-                  {lineRows[row].events.map((event) => {
+                  {lineRows[row].events.filter((event) => !visible.hiddenEventIds.includes(event.id)).map((event) => {
                     const shared = event.shared;
                     const isPrimary = event.primaryLineId === line.id;
                     const position = layout.positions[event.id];
@@ -193,7 +243,9 @@ export function RoadmapWorkbench({ state, chapters, busy, onChange, onDiscuss, o
         {!editor.fresh && eventLines(roadmap, editor.event.id).length > 1 && <p className="roadmap-shared-note">这是共享事件，修改会同步到：{eventLines(roadmap, editor.event.id).map((line) => line.title).join("、")}。</p>}
         <label className="form-field"><span>发生什么事？</span><input aria-label="事件标题" maxLength={80} value={editor.event.title} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, title: event.target.value } })} /></label><div className="roadmap-editor-row"><label className="form-field"><span>推进顺序（数字小的在前）</span><input aria-label="事件推进顺序" type="number" min={0} max={10000} step="any" value={editor.event.order} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, order: Number(event.target.value) } })} /></label><label className="form-field"><span>计划章节，例如 1–3</span><input aria-label="事件计划章节" maxLength={40} value={editor.event.chapter} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, chapter: event.target.value } })} /></label><label className="form-field"><span>写作进度</span><NativeSelect aria-label="事件写作进度" value={editor.event.status} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, status: event.target.value as RoadmapEvent["status"] } })}>{Object.entries(eventStatus).map(([value, label]) => <NativeSelectOption key={value} value={value}>{label}</NativeSelectOption>)}</NativeSelect></label></div><label className="form-field"><span>人物选择、代价与后果</span><Textarea aria-label="事件剧情说明" maxLength={800} value={editor.event.note} onChange={(event) => setEditor({ ...editor, event: { ...editor.event, note: event.target.value } })} /></label>
       </>}
-      {error && <p className="ai-error" role="alert">{error}</p>}<footer>{editor.kind !== "join" && !editor.fresh && <Button variant="ghost" disabled={busy} onClick={remove}><Trash2 />{editor.kind === "line" ? "删除故事线" : "从本线移除"}</Button>}<Button variant="outline" onClick={closeEditor}>取消</Button><Button disabled={busy} onClick={save}><Check />{editor.kind === "join" ? "建立交汇" : "保存安排"}</Button></footer>
+      {error && <p className="ai-error" role="alert">{error}</p>}
+      {staleFields().length > 0 && <p className="roadmap-stale" role="status">正式内容已更新，可重新载入：<Button variant="outline" size="sm" disabled={busy} onClick={() => begin(editor.kind === "event" ? { kind: "event", event: roadmap.events.find((event) => event.id === editor.event.id) ?? editor.event, lineId: editor.lineId, fresh: false } : editor.kind === "line" ? { kind: "line", line: roadmap.lines.find((line) => line.id === editor.line.id) ?? editor.line, fresh: false } : editor)}>重新载入正式内容</Button></p>}
+      <footer>{editor.kind !== "join" && !editor.fresh && <Button variant="ghost" disabled={busy} onClick={remove}><Trash2 />{editor.kind === "line" ? "删除故事线" : "从本线移除"}</Button>}<Button variant="outline" onClick={closeEditor}>取消</Button><Button disabled={busy} onClick={save}><Check />{editor.kind === "join" ? "建立交汇" : "保存安排"}</Button></footer>
     </section>}
   </div>;
 }
