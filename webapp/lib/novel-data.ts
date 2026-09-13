@@ -22,6 +22,45 @@ export const referenceSchema = z.object({ id, title: z.string(), kind: z.string(
   entity: z.string().max(200).optional(), tier: z.number().int().min(0).max(9).optional(),
   evidence: referenceEvidenceSchema.optional(),
 });
+// Real excerpts are their own data, not a summary alias: provenance, usage basis,
+// scope, content hash and the conditioning/calibration/evaluation split all travel
+// with the text. Every field is declared so storage and backups never drop them.
+const styleSampleSchema = z.object({
+  id: z.string().min(1).max(160), bookId: z.string().max(160), targetId: z.string().max(200),
+  text: z.string().max(20000), contentHash: z.string().max(64),
+  source: z.object({
+    kind: z.enum(["primary_excerpt", "critical_analysis", "bibliographic_metadata", "model_prior", "user_approved_output"]),
+    title: z.string().max(200), locator: z.string().max(200).optional(), url: z.string().max(1200).optional(),
+    author: z.string().max(200).optional(), work: z.string().max(200).optional(), retrievedAt: z.string().max(60).optional(),
+    usageBasis: z.enum(["user_owned", "licensed", "public_domain", "permitted_excerpt", "unknown"]),
+  }),
+  sceneTags: z.array(z.enum(["dialogue", "daily", "conflict", "action", "interior", "environment", "mixed"])).max(3),
+  pointOfView: z.string().max(40).optional(),
+  textRole: z.enum(["narration", "dialogue", "mixed"]),
+  split: z.enum(["conditioning", "calibration", "evaluation"]),
+  charCount: z.number().nonnegative().max(20000), createdAt: z.string().max(60),
+  notes: z.array(z.string().max(300)).max(6),
+});
+const styleRuleSchema = z.object({
+  id: z.string().max(160), text: z.string().max(400),
+  layer: z.enum(["mechanical", "semantic", "chapter"]),
+  origin: z.enum(["primary_excerpt", "critical_analysis", "bibliographic_metadata", "model_prior", "user_approved_output"]),
+  evidenceIds: z.array(z.string().max(160)).max(40),
+});
+const styleProfileSchema = z.object({
+  id: z.string().min(1).max(160), bookId: z.string().max(160), targetId: z.string().max(200),
+  version: z.number().int().positive().max(9999), createdAt: z.string().max(60),
+  scope: z.object({ author: z.string().max(200), work: z.string().max(200), note: z.string().max(400) }),
+  sampleIds: z.array(z.string().max(160)).max(400),
+  stats: z.unknown().optional(),
+  rules: z.array(styleRuleSchema).max(80),
+  sceneRules: z.array(z.object({ scene: z.enum(["dialogue", "daily", "conflict", "action", "interior", "environment", "mixed"]), rules: z.array(styleRuleSchema).max(20) })).max(8),
+  constraints: z.array(z.string().max(300)).max(8),
+  uncertainties: z.array(z.string().max(300)).max(10),
+  extraction: z.object({ model: z.string().max(120), promptVersion: z.string().max(40) }),
+  authorRulesVersion: z.string().max(64), derivedStale: z.boolean(),
+  notes: z.array(z.string().max(400)).max(10),
+});
 const branchSchema = z.object({ from: z.number().int().nonnegative().optional(), to: z.number().int().nonnegative().optional(), status: z.enum(["planned", "active", "resolved"]).optional(), id, title: z.string(), color: z.string().regex(/^#[0-9a-f]{6}$/i), path: z.string(), labels: z.array(z.object({ x: z.number().finite(), y: z.number().finite(), text: z.string() })) });
 export const plotNodeSchema = z.object({ title: z.string().min(1).max(80), chapter: z.string().min(1).max(40), note: z.string().max(400) });
 const plotSchema = z.object({ instruction: z.string(), branches: z.array(branchSchema), selected: z.string(), selectedNode: z.string(), zoom: z.number().min(.02).max(2), version: z.number().int().positive(), nodes: z.array(plotNodeSchema).optional(), summary: z.string().optional(),
@@ -38,7 +77,19 @@ const storySchema = z.object({ idea: z.string(), tags: z.array(z.string()), refe
 // single damaged thread or draft never makes the whole book unreadable.
 export const workspaceSchema = storySchema.partial().extend({
   messages: z.array(z.object({ role: z.enum(["ai", "user"]), text: z.string() })).optional(),
-  versions: z.array(z.object({ id, label: z.string(), createdAt: z.string(), idea: z.string(), snapshot: storySchema.optional() })).optional(),
+  versions: z.array(z.object({
+    id, label: z.string(), createdAt: z.string(), idea: z.string(),
+    // A story snapshot keeps only a lightweight style reference — profile id and
+    // version, author rules hash and the manifest of used excerpts. Excerpt text is
+    // never copied into every snapshot.
+    snapshot: storySchema.extend({
+      styleConfig: z.object({
+        activeProfileId: z.string().max(160), profileVersion: z.number().int().positive().max(9999),
+        authorRulesHash: z.string().max(64),
+        sampleManifest: z.array(z.object({ id: z.string().max(160), contentHash: z.string().max(64) })).max(400),
+      }).optional(),
+    }).optional(),
+  })).optional(),
   assetVersions: z.record(z.array(assetVersionSchema)).optional(),
   proposals: z.record(z.string()).optional(),
   reviews: z.record(z.string()).optional(),
@@ -50,6 +101,14 @@ export const workspaceSchema = storySchema.partial().extend({
   // evidence obtained and the candidate. Working state, so it stays out of
   // content snapshots. Parsed tolerantly and normalized on load.
   referenceAssist: z.record(z.string(), z.unknown()).optional(),
+  // Sample library and derived style profiles. Working/derived state: kept in the
+  // library and backups, deliberately excluded from story version snapshots so
+  // excerpts are not copied into every snapshot.
+  styleSamples: z.array(styleSampleSchema).max(400).optional(),
+  styleProfiles: z.record(z.string(), styleProfileSchema).optional(),
+  // Append-only profile history: a snapshot or candidate may still point at an
+  // older version, so superseded versions are kept rather than overwritten.
+  styleProfileHistory: z.record(z.string(), z.array(styleProfileSchema).max(20)).optional(),
 });
 const backupSchema = z.object({ version: z.union([z.literal(2), z.literal(3)]).optional(), books: z.array(bookSchema), workspaces: z.record(id, workspaceSchema).default({}) });
 

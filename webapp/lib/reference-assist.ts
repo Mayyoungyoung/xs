@@ -699,6 +699,20 @@ export function isStylePlanText(text: string): boolean { return text.trimStart()
 // One draft per module scope, saved with the book so switching modules, closing
 // and reopening, cancelling or a late response never lose the author's input.
 export type AssistMessage = { role: "ai" | "user"; text: string; at: string };
+// A finished or interrupted fidelity run. It fixes the profile version and the
+// excerpt manifest the candidate was made from, so a later configuration change
+// cannot rewrite what the author reviewed.
+export type AssistRun = {
+  stage: "idle" | "generating" | "reviewing" | "revising" | "done" | "interrupted" | "failed";
+  note: string;
+  profileId: string;
+  profileVersion: number;
+  sampleManifest: Array<{ id: string; contentHash: string }>;
+  revisions: number;
+  requests: number;
+  reviewed: boolean;
+  at: string;
+};
 export type AssistDraft = {
   scope: string;
   requestId: string;
@@ -708,6 +722,7 @@ export type AssistDraft = {
   sample: string;
   thread: AssistMessage[];
   applied: { at: string; version: number } | null;
+  run: AssistRun | null;
   updatedAt: string;
 };
 
@@ -819,14 +834,37 @@ export function normalizeAssistDrafts(input: unknown): Record<string, AssistDraf
       applied: value.applied && typeof value.applied === "object" && typeof (value.applied as { at?: unknown }).at === "string"
         ? { at: (value.applied as { at: string }).at.slice(0, 60), version: typeof (value.applied as { version?: unknown }).version === "number" ? Math.max(1, Math.round((value.applied as { version: number }).version)) : 1 }
         : null,
+      run: normalizeAssistRun(value.run),
       updatedAt: typeof value.updatedAt === "string" ? value.updatedAt.slice(0, 60) : "",
     };
   }
   return result;
 }
 
+const RUN_STAGES: AssistRun["stage"][] = ["idle", "generating", "reviewing", "revising", "done", "interrupted", "failed"];
+
+export function normalizeAssistRun(input: unknown): AssistRun | null {
+  if (!input || typeof input !== "object") return null;
+  const value = input as Partial<AssistRun>;
+  if (!RUN_STAGES.includes(value.stage as AssistRun["stage"])) return null;
+  return {
+    stage: value.stage as AssistRun["stage"],
+    note: typeof value.note === "string" ? value.note.slice(0, 400) : "",
+    profileId: typeof value.profileId === "string" ? value.profileId.slice(0, 160) : "",
+    profileVersion: typeof value.profileVersion === "number" && value.profileVersion > 0 ? Math.round(value.profileVersion) : 0,
+    sampleManifest: (Array.isArray(value.sampleManifest) ? value.sampleManifest : []).flatMap((entry) => {
+      const item = entry as Partial<{ id: string; contentHash: string }> | undefined;
+      return item && typeof item.id === "string" ? [{ id: item.id.slice(0, 160), contentHash: typeof item.contentHash === "string" ? item.contentHash.slice(0, 64) : "" }] : [];
+    }).slice(0, 400),
+    revisions: typeof value.revisions === "number" && value.revisions >= 0 ? Math.min(9, Math.round(value.revisions)) : 0,
+    requests: typeof value.requests === "number" && value.requests >= 0 ? Math.min(99, Math.round(value.requests)) : 0,
+    reviewed: value.reviewed === true,
+    at: typeof value.at === "string" ? value.at.slice(0, 60) : "",
+  };
+}
+
 export function emptyAssistDraft(scope: string, updatedAt = new Date().toISOString()): AssistDraft {
-  return { scope, requestId: "", input: "", plan: null, evidence: [], sample: "", thread: [], applied: null, updatedAt };
+  return { scope, requestId: "", input: "", plan: null, evidence: [], sample: "", thread: [], applied: null, run: null, updatedAt };
 }
 
 // The packet sent to the writing model. It is compact on purpose: the object, the

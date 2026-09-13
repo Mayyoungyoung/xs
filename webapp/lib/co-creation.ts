@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { RoadmapEvent, Storyline, StoryRoadmap } from "./story-roadmap";
 import { chapterPlan, getRoadmap } from "./story-roadmap";
 import { roadmapSchema } from "./roadmap-schema";
+import { buildSceneSpec, buildStyleContext, selectStyleSamples, type StyleProfile, type StyleSample } from "./style-fidelity";
 
 export type CoModuleId = "overview" | "world" | "characters" | "style" | "outline" | "timeline" | "chapters" | "roadmap" | "event" | "line";
 
@@ -928,6 +929,13 @@ export type ContextPacket = {
   // the same text injected into `text`, surfaced so the panel can show which
   // style and version is in force for this request.
   styleRules?: { text: string; version: number } | null;
+  // The excerpt channel for prose targets only: the active profile version, the
+  // matched excerpts that were really sent, and what was trimmed. Preview and
+  // payload read this same object.
+  styleContext?: {
+    text: string; sampleIds: string[]; profileId: string; profileVersion: number;
+    chars: number; reservedChars: number; trimming: string[];
+  } | null;
 };
 
 export type CoContext = ContextPacket;
@@ -946,6 +954,8 @@ export type PacketInput = {
   selection?: TextAnchor | null;
   pendingCandidates?: CoProposalRecord[];
   budget?: number;
+  // Which style profile is in force, when the caller knows it explicitly.
+  activeStyleProfileId?: string;
 };
 
 // One packet drives both the panel preview and the request payload, so what the
@@ -981,7 +991,45 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
   // author's own instructions, locks and book settings still take precedence.
   const styleText = (workspace.assets.style ?? "").trim();
   const styleRules = styleText ? { text: styleText.slice(0, 14000), version: (workspace.assetVersions?.style?.length ?? 0) + 1 } : null;
-  const stylePart = styleRules && target.moduleId !== "style"
+  // The excerpt channel is built for prose targets only, from the active profile
+  // and the excerpts the author actually provided.
+  const sceneChapter = workspace.chapters[chapterIndex];
+  const active = manuscript ? activeStyleProfile(workspace, input.activeStyleProfileId) : { profile: null };
+  const styleSamples = workspace.styleSamples ?? [];
+  let styleContext: ContextPacket["styleContext"] = null;
+  if (manuscript && active.profile && styleSamples.length) {
+    const boundEventsOfChapter = (sceneChapter?.plotEventIds ?? [])
+      .map((id) => roadmap.events.find((event) => event.id === id))
+      .filter((event): event is RoadmapEvent => Boolean(event))
+      .map((event) => ({ id: event.id, title: event.title, note: event.note, chapter: event.chapter, status: event.status }));
+    const spec = buildSceneSpec({
+      chapterId: sceneChapter?.id ?? target.entityId ?? workspace.activeChapterId,
+      chapterTitle: sceneChapter?.title ?? "当前章",
+      chapterContent: text,
+      boundEvents: boundEventsOfChapter,
+      futureEvents: roadmap.events
+        .filter((event) => !(sceneChapter?.plotEventIds ?? []).includes(event.id) && event.status === "planned")
+        .map((event) => ({ id: event.id, title: event.title, chapter: event.chapter })).slice(0, 12),
+      characterNotes: workspace.assets.characters,
+      ...(selection ? { selectionText: selection.text } : {}),
+      ...(prior.at(-1)?.content ? { previousChapterTail: prior.at(-1)!.content.slice(-500) } : {}),
+    });
+    // Samples get their own slice of the budget so they are never cut mid-excerpt
+    // by the packet assembler.
+    const sampleBudget = Math.max(1200, Math.min(6000, Math.floor(budget * 0.25)));
+    const chosen = selectStyleSamples(active.profile, spec, styleSamples, { budgetChars: sampleBudget });
+    const built = buildStyleContext(active.profile, chosen.picks, styleText, sampleBudget);
+    styleContext = {
+      text: built.text, sampleIds: built.sampleIds, profileId: active.profile.id,
+      profileVersion: active.profile.version, chars: built.chars, reservedChars: built.reservedChars,
+      trimming: [...chosen.notes, ...built.trimming],
+    };
+  } else if (manuscript && active.reason) {
+    trimming.push(active.reason);
+  }
+  // Rules are injected once: when the excerpt channel is present it already
+  // carries the author's rules, so the standalone block is skipped.
+  const stylePart = styleRules && target.moduleId !== "style" && !styleContext
     ? `【本次生效文风 · 第 ${styleRules.version} 版（只约束表达方式）】\n${styleRules.text}\n（本书的人物、设定、锁定内容与作者本次明确要求优先于以上文风规则；参考风格不得改变已发生的情节。）`
     : "";
   const chapterPlan = target.moduleId === "chapters" ? chapterPlanText(workspace, target) : "";
@@ -994,28 +1042,27 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
   const priorText = prior.map((chapter) => `【前文：${chapter.title}，末尾片段】\n${chapter.content.slice(-5000)}`).join("\n\n");
   const referenceText = references.slice(-referenceCount).map((item, index) => `${index + 1}. ${item.title} [${item.kind}]\n${item.summary.slice(0, referenceLimit)}`).join("\n\n");
 
-  const parts = [
-    `【本次目标】${label}`,
-    locked.length ? `【作者锁定】${locked.map((field) => field === "full" ? "整段内容" : field).join("、")}，不要改写锁定内容。` : "",
-    `【当前内容】\n${text.slice(0, 24000) || "（当前为空）"}`,
-    selectionText,
-    settingsText,
-    stylePart,
-    chapterPlan,
-    eventText,
-    lineText,
-    candidateText,
-    workspace.plot.summary ? `【主支线说明】\n${workspace.plot.summary}` : "",
-    `【世界线写作约束】剧情事件是计划，不是已经发生的正文事实；未选中的后续事件只作伏笔。`,
-    priorText,
-    `【讨论摘要】\n${summarizeThread(thread?.messages ?? [])}`,
-    referenceText ? `【参考材料${manuscript ? "（仅作结构参考，不要写入正文，也不要当作文风依据）" : ""}】\n${referenceText}` : "",
-  ].filter(Boolean);
-  let assembled = parts.join("\n\n");
-  if (assembled.length > budget) {
-    trimming.push(`相关内容超过 ${Math.round(budget / 1000)}k 字符，已按优先级裁剪：参考材料与前文最先缩短。`);
-    assembled = `${assembled.slice(0, budget - 40)}\n…（已裁剪）`;
-  }
+  // Ordered by importance, not by enumeration order: the assembler reserves the
+  // critical blocks and reports every cut.
+  const blocks: BudgetBlock[] = [
+    { key: "本次目标", priority: 1, text: `【本次目标】${label}` },
+    { key: "作者锁定", priority: 1, text: locked.length ? `【作者锁定】${locked.map((field) => field === "full" ? "整段内容" : field).join("、")}，不要改写锁定内容。` : "" },
+    { key: "当前内容", priority: 2, text: `【当前内容】\n${text.slice(0, 24000) || "（当前为空）"}` },
+    { key: "作者选中内容", priority: 2, text: selectionText },
+    { key: "本次生效文风", priority: 3, text: stylePart },
+    { key: "场景匹配样段", priority: 4, text: styleContext?.text ?? "" },
+    { key: "本章推进目标", priority: 5, text: chapterPlan },
+    { key: "剧情事件", priority: 5, text: eventText },
+    { key: "当前故事线", priority: 5, text: lineText },
+    { key: "世界线写作约束", priority: 6, text: `【世界线写作约束】剧情事件是计划，不是已经发生的正文事实；未选中的后续事件只作伏笔。` },
+    { key: "相关设定", priority: 7, text: settingsText },
+    { key: "主支线说明", priority: 8, text: workspace.plot.summary ? `【主支线说明】\n${workspace.plot.summary}` : "" },
+    { key: "待采纳候选", priority: 8, text: candidateText },
+    { key: "相关前文", priority: 9, text: priorText },
+    { key: "讨论摘要", priority: 10, text: `【讨论摘要】\n${summarizeThread(thread?.messages ?? [])}` },
+    { key: "借鉴资料", priority: 11, text: referenceText ? `【参考材料${manuscript ? "（仅作结构参考，不要写入正文，也不要当作文风依据）" : ""}】\n${referenceText}` : "" },
+  ];
+  const assembled = assembleByPriority(blocks, budget, trimming);
   const sections: CoContextSection[] = [
     { label: "当前目标", detail: label, included: true },
     { label: "作者锁定", detail: locked.length ? locked.map((field) => field === "full" ? "整段内容" : field).join("、") : "未锁定，AI 只会提出候选稿", included: locked.length > 0 },
@@ -1035,6 +1082,7 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
     ...(scope ? { referenceScope: scope } : {}),
     references: references.slice(-referenceCount).map((item) => ({ title: item.title.slice(0, 500), kind: item.kind.slice(0, 100), summary: item.summary.slice(0, referenceLimit) })),
     styleRules,
+    styleContext,
     candidates: pending.map((candidate) => ({
       id: candidate.id, label: candidate.targetLabel,
       ...(candidate.instruction ? { instruction: candidate.instruction } : {}),
@@ -1078,12 +1126,53 @@ export type WorkspaceLike = {
   references: Array<{ id: string; title: string; kind: string; summary: string; scope: string }>;
   plot: PlotLike;
   assetVersions?: Record<string, Array<{ id: string }>>;
+  styleSamples?: StyleSample[];
+  styleProfiles?: Record<string, StyleProfile>;
 };
 
 // Targets whose request writes or rewrites prose: raw reference material is
 // condensed hard so the manuscript call carries the adopted rules instead of
 // author biographies, other books' plots and encyclopedia summaries.
 const MANUSCRIPT_TARGETS = new Set<string>(["chapters", "outline", "timeline", "roadmap", "event", "line"]);
+
+// Priority-first assembly: hard constraints, the author's rules and the matched
+// excerpts are reserved; background and raw reference material shrink or drop
+// first, and every cut is reported instead of hidden behind a tail slice.
+export type BudgetBlock = { key: string; text: string; priority: number };
+const CRITICAL_PRIORITY = 6;
+
+export function assembleByPriority(blocks: BudgetBlock[], budget: number, trimming: string[]): string {
+  const ordered = blocks.filter((block) => block.text).sort((a, b) => a.priority - b.priority);
+  const kept: BudgetBlock[] = [];
+  let used = 0;
+  for (const block of ordered) {
+    const cost = block.text.length + 2;
+    if (used + cost <= budget) { kept.push(block); used += cost; continue; }
+    const remaining = budget - used - 2;
+    if (remaining > 200 && block.priority <= CRITICAL_PRIORITY) {
+      kept.push({ ...block, text: `${block.text.slice(0, remaining - 20)}\n…（已裁剪）` });
+      used += remaining;
+      trimming.push(`「${block.key}」超长，已截断保留前 ${remaining - 20} 字（属于必须保留的内容）。`);
+    } else {
+      trimming.push(`已省略「${block.key}」：超出 ${Math.round(budget / 1000)}k 字符预算，优先级较低。`);
+    }
+  }
+  const originalOrder = new Map(blocks.map((block, index) => [block.key, index]));
+  kept.sort((a, b) => (originalOrder.get(a.key) ?? 0) - (originalOrder.get(b.key) ?? 0));
+  return kept.map((block) => block.text).join("\n\n");
+}
+
+// The profile in force for the book style. Explicit id first, then the book-style
+// key, then a single unambiguous entry — never a silent guess between several.
+export function activeStyleProfile(workspace: WorkspaceLike, explicitId?: string): { profile: StyleProfile | null; reason?: string } {
+  const profiles = workspace.styleProfiles ?? {};
+  const entries = Object.entries(profiles);
+  if (!entries.length) return { profile: null };
+  if (explicitId && profiles[explicitId]) return { profile: profiles[explicitId] };
+  if (profiles.style) return { profile: profiles.style };
+  if (entries.length === 1) return { profile: entries[0][1] };
+  return { profile: null, reason: `本书有 ${entries.length} 份风格档案但没有指定生效档案，本次不携带样段。` };
+}
 
 // Text of the target the author is working on. Structured targets read their
 // real field instead of an empty assets entry.

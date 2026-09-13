@@ -3,6 +3,7 @@ import type { ReferenceItem } from "./reference-library-dialog";
 import { getRoadmap, worldlineContext, type StoryRoadmap } from "@/lib/story-roadmap";
 import { normalizeLocks, normalizeProposals, normalizeThreads, normalizeView, type CoProposalRecord, type CoThreads, type ContextPacket, type LockMap } from "@/lib/co-creation";
 import { normalizeAssistDrafts, type AssistDraft } from "@/lib/reference-assist";
+import { buildStyleConfigRef, normalizeProfileHistory, normalizeStyleProfiles, normalizeStyleSamples, type StyleConfigRef, type StyleProfile, type StyleSample } from "@/lib/style-fidelity";
 
 export type StoryMessage = { role: "ai" | "user"; text: string };
 // A context packet, when present, is the exact payload sent to the model.
@@ -37,7 +38,11 @@ export type PlotState = {
 
 export type Chapter = { id: string; title: string; content: string; updatedAt: string; plotEventIds?: string[] };
 export type AssetVersion = { id: string; label: string; createdAt: string; content: string };
-export type StorySnapshot = Pick<BookWorkspace, "idea" | "tags" | "references" | "assets" | "plot" | "chapters" | "activeChapterId">;
+export type StorySnapshot = Pick<BookWorkspace, "idea" | "tags" | "references" | "assets" | "plot" | "chapters" | "activeChapterId"> & {
+  // Lightweight style configuration reference; the excerpt text itself stays in the
+  // sample library and is never copied into every snapshot.
+  styleConfig?: StyleConfigRef;
+};
 
 export type BlueprintVersion = {
   id: string;
@@ -66,6 +71,13 @@ export type BookWorkspace = {
   view: Record<string, Record<string, number>>;
   // 借鉴助手 state per module scope (input, identification, evidence, candidate).
   referenceAssist: Record<string, AssistDraft>;
+  // Real excerpts and the profiles derived from them. Excerpts are evidence, not
+  // summary text; profiles carry version, sample ids and uncertainty.
+  styleSamples: StyleSample[];
+  styleProfiles: Record<string, StyleProfile>;
+  // Append-only versions, so a snapshot or candidate can still resolve the exact
+  // profile it was produced from.
+  styleProfileHistory: Record<string, StyleProfile[]>;
 };
 
 // Viewport/zoom preferences are stored per module and never touch revisions.
@@ -89,6 +101,9 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
     locks: {},
     view: {},
     referenceAssist: {},
+    styleSamples: [],
+    styleProfiles: {},
+    styleProfileHistory: {},
     plot: {
       instruction: `为《${book.title}》设计一条围绕核心冲突展开的支线，在中段与主线交汇，并在结局前回收。`,
       branches: [],
@@ -103,12 +118,15 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
 
 // Input coming from storage, imports or the desktop bridge: content fields are
 // typed, while co-creation state arrives unvalidated and gets normalized below.
-export type SavedWorkspaceInput = Partial<Omit<BookWorkspace, "threads" | "coProposals" | "locks" | "view" | "referenceAssist">> & {
+export type SavedWorkspaceInput = Partial<Omit<BookWorkspace, "threads" | "coProposals" | "locks" | "view" | "referenceAssist" | "styleSamples" | "styleProfiles" | "styleProfileHistory">> & {
   threads?: unknown;
   coProposals?: unknown;
   locks?: unknown;
   view?: unknown;
   referenceAssist?: unknown;
+  styleSamples?: unknown;
+  styleProfiles?: unknown;
+  styleProfileHistory?: unknown;
 };
 
 export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInput | null): BookWorkspace {
@@ -128,6 +146,9 @@ export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInpu
     locks: normalizeLocks(saved.locks),
     view: normalizeView(saved.view),
     referenceAssist: normalizeAssistDrafts(saved.referenceAssist),
+    styleSamples: normalizeStyleSamples(saved.styleSamples),
+    styleProfiles: normalizeStyleProfiles(saved.styleProfiles),
+    styleProfileHistory: normalizeProfileHistory(saved.styleProfileHistory),
     plot: { ...base.plot, ...saved.plot, branches: saved.plot?.branches ?? base.plot.branches },
     versions: saved.versions?.length ? saved.versions : base.versions,
   };
@@ -136,7 +157,8 @@ export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInpu
 
 export function storySnapshot(workspace: BookWorkspace): StorySnapshot {
   const { idea, tags, references, assets, plot, chapters, activeChapterId } = workspace;
-  return structuredClone({ idea, tags, references, assets, plot, chapters, activeChapterId });
+  const styleConfig = buildStyleConfigRef(workspace.styleProfiles.style ?? null, assets.style ?? "", workspace.styleSamples);
+  return structuredClone({ idea, tags, references, assets, plot, chapters, activeChapterId, ...(styleConfig ? { styleConfig } : {}) });
 }
 
 export function withSnapshot(workspace: BookWorkspace, label: string): BookWorkspace {

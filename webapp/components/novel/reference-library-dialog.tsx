@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { readSearchCredentials } from "@/lib/model-credentials";
+import { profileRulesToText, type StyleProfile, type StyleSample } from "@/lib/style-fidelity";
+import { StyleFidelityPanel } from "./style-fidelity-panel";
 import {
   DIMENSION_LABELS, ENTITY_KIND_LABELS, EVIDENCE_LABELS, MEDIUM_LABELS, mergeModelPlan, parseReferenceBrief,
   reviseStylePlan, stylePlanToRuleText, styleReferencePrompt, statusBadges,
@@ -43,6 +45,13 @@ type Props = {
   onGenerateStyle: (prompt: string) => Promise<string>;
   onTrialWrite: (ruleText: string) => Promise<string>;
   onApplyStyle: (ruleText: string, mode: "replace-all" | "append") => { ok: boolean; error?: string };
+  // Sample library and derived profile for the style flow.
+  styleSamples: StyleSample[];
+  styleProfile: StyleProfile | null;
+  onSamplesChange: (next: StyleSample[]) => void;
+  onProfileChange: (profile: StyleProfile) => void;
+  onGenerateProfile: (prompt: string) => Promise<string>;
+  onFidelityRun: (payload: { ruleText: string; profile: StyleProfile | null; sceneRange: "selection" | "chapter" }) => Promise<{ ok: boolean; note: string; error?: string }>;
 };
 
 const scopeNames: Record<ReferenceScope, string> = { plot: "剧情结构", character: "人物设定", style: "文笔指纹", world: "世界观" };
@@ -65,6 +74,7 @@ type Entry = "ai" | "search" | "local";
 export function ReferenceLibraryDialog({
   open, onOpenChange, scope, selected, onAdd, onRemove,
   bookId, assist, onAssistChange, currentStyle, onGenerateStyle, onTrialWrite, onApplyStyle,
+  styleSamples, styleProfile, onSamplesChange, onProfileChange, onGenerateProfile, onFidelityRun,
 }: Props) {
   const [entry, setEntry] = useState<Entry>("ai");
   const [input, setInput] = useState(assist.input);
@@ -87,7 +97,10 @@ export function ReferenceLibraryDialog({
   const fileInput = useRef<HTMLInputElement>(null);
 
   const plan = assist.plan;
-  const ruleText = useMemo(() => (plan ? stylePlanToRuleText(plan) : ""), [plan]);
+  // The applied text carries both the borrow plan and, when present, the rules
+  // derived from real excerpts with their evidence — the profile stays a derived
+  // view, this text remains the single official style.
+  const ruleText = useMemo(() => [plan ? stylePlanToRuleText(plan) : "", styleProfile ? profileRulesToText(styleProfile) : ""].filter(Boolean).join("\n\n"), [plan, styleProfile]);
   const badges = useMemo(() => (plan ? statusBadges(briefOf(assist), assist.evidence) : []), [assist, plan]);
   const scoped = selected.filter((item) => item.scope === scope);
   const busy = running !== null;
@@ -374,6 +387,20 @@ export function ReferenceLibraryDialog({
             {assist.applied && <small>上次应用：第 {assist.applied.version} 版 · {new Date(assist.applied.at).toLocaleString("zh-CN")}</small>}
           </div>}
         </section>}
+
+        <StyleFidelityPanel
+          bookId={bookId}
+          scope={scope}
+          targetId="style"
+          authorRules={currentStyle}
+          samples={styleSamples}
+          profile={styleProfile}
+          run={assist.run ?? null}
+          onSamplesChange={onSamplesChange}
+          onProfileChange={onProfileChange}
+          onGenerateProfile={onGenerateProfile}
+          onRun={onFidelityRun}
+        />
 
         {notice && <p className="reference-source-note" role="status">{notice}</p>}
         {error && <p className="reference-error" role="alert">{error}</p>}

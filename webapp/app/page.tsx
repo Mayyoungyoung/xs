@@ -29,7 +29,11 @@ import { defaultChoice, readModelChoice, readSearchCredentials, readSessionCrede
 import { DEFAULT_SEARCH_PROVIDER } from "@/lib/reference-search";
 import { CUSTOM_PROVIDER_ID, DEFAULT_PROVIDER_ID, PROVIDERS, providerById, shortModelLabel, validModelName } from "@/lib/model-providers";
 import { applyProposalTransaction, buildContextPacket, makeTextProposal, MODULE_LABELS, targetKey, type CoTarget } from "@/lib/co-creation";
-import { emptyAssistDraft } from "@/lib/reference-assist";
+import { emptyAssistDraft, type AssistRun } from "@/lib/reference-assist";
+import {
+  advanceFidelityRun, appendProfileVersion, buildSampleDigest, majorDeviationCount, parseStyleReview,
+  resolveStyleConfigRef, sampleManifest, startFidelityRun, type StyleProfile,
+} from "@/lib/style-fidelity";
 import type { AdoptOptions, AdoptOutcome } from "@/components/novel/co-creation-panel";
 
 const navGroups = [
@@ -144,7 +148,19 @@ export default function Home() {
     loadLibrary(initialBooks).then((loaded) => {
       if (!alive) return;
       revision.current = loaded.revision;
-      setBooks(loaded.books); setWorkspaces(loaded.workspaces); setHydrated(true);
+      setBooks(loaded.books);
+      const inflight = new Set(["generating", "reviewing", "revising"]);
+      setWorkspaces(Object.fromEntries(Object.entries(loaded.workspaces).map(([id, w]) => [id, {
+        ...w,
+        referenceAssist: Object.fromEntries(Object.entries(w.referenceAssist).map(([key, draft]) => [
+          key,
+          draft.run && inflight.has(draft.run.stage)
+            ? { ...draft, run: { ...draft.run, stage: "interrupted" as const, note: `上次在「${draft.run.stage}」阶段中断，未自动重试。${draft.sample ? "已保留最后一次有效候选。" : ""}` } }
+            : draft,
+        ])),
+      }])));
+      setHydrated(true);
+
       if (window.matchMedia("(max-width: 1180px)").matches) setRightOpen(false);
       setCredentials(readSessionCredentials());
       setSearchCredentials(readSearchCredentials());
@@ -298,6 +314,118 @@ export default function Home() {
     ].join("\n");
   }
 
+  function updateStyleSamples(next: BookWorkspace["styleSamples"]) {
+    updateWorkspace((w) => ({ ...w, styleSamples: next }));
+  }
+
+  function applyStyleProfile(profile: StyleProfile) {
+    updateWorkspace((w) => ({
+      ...w,
+      styleProfiles: { ...w.styleProfiles, [profile.targetId]: profile },
+      styleProfileHistory: { ...w.styleProfileHistory, [profile.targetId]: appendProfileVersion(w.styleProfileHistory[profile.targetId] ?? [], profile) },
+    }));
+    notify(`风格档案已更新到第 ${profile.version} 版；旧版本保留，可随故事快照恢复`);
+  }
+
+  function writeDraftRun(scope: ReferenceScope, run: AssistRun | null, sample?: string) {
+    updateWorkspace((w) => {
+      const current = w.referenceAssist[scope] ?? emptyAssistDraft(scope);
+      return {
+        ...w,
+        referenceAssist: {
+          ...w.referenceAssist,
+          [scope]: { ...current, ...(sample !== undefined ? { sample } : {}), run, updatedAt: new Date().toISOString() },
+        },
+      };
+    });
+  }
+
+  async function runFidelity(payload: { ruleText: string; profile: StyleProfile | null; sceneRange: "selection" | "chapter" }): Promise<{ ok: boolean; note: string; error?: string }> {
+    const scope = referenceScope;
+    const latest = mergeBookWorkspace(currentBook, workspacesRef.current[currentBook.id]);
+    const chapterId = latest.activeChapterId;
+    const chapter = latest.chapters.find((item) => item.id === chapterId);
+    const conditioning = latest.styleSamples.filter((sample) => sample.split === "conditioning");
+    const manifest = sampleManifest(conditioning);
+    const lock = {
+      profileId: payload.profile?.id ?? "", profileVersion: payload.profile?.version ?? 0,
+      sampleManifest: manifest, revisions: 0, requests: 0, reviewed: false,
+    };
+    let state = startFidelityRun({ bookId: currentBook.id, chapterId, baseRevision: latest.plot.version, profileVersion: lock.profileVersion, enabled: true, maxRevisions: 1 });
+    const packet = buildContextPacket({ workspace: latest, target: { moduleId: "chapters", entityId: chapterId }, locks: latest.locks });
+    const sceneLine = chapter?.content?.trim()
+      ? `接着《${chapter.title}》现有场景与人物语气，写约 300–500 字的候选正文；不要重复已有正文。`
+      : `本章还没有正文，请写约 300–500 字的原创场景作为示范（例如：雨夜的车站，主角在等一个不会来的人）。`;
+    let candidate = "";
+    try {
+      writeDraftRun(scope, { stage: "generating", note: "正在生成候选。", ...lock, at: new Date().toISOString() });
+      candidate = await askAI(`${sceneLine}\n只输出正文，不要解释。`, "chapter_write", { packet });
+      state = advanceFidelityRun(state, { status: "ok" }).run;
+      writeDraftRun(scope, { stage: "reviewing", note: "已生成候选，正在复核。", ...lock, requests: 1, at: new Date().toISOString() }, candidate);
+      const digest = buildSampleDigest(conditioning, 4000);
+      if (payload.profile && digest.sampleIds.length) {
+        const reviewPrompt = [
+          "请对照下面的真实样段，复核候选正文在表达方式上的差异。",
+          '只输出 JSON 对象：{"items":[{"location":"候选中的位置","issue":"与样段的表达差异","evidenceIds":["样段 ID"],"severity":"major|minor"}]}',
+          "",
+          digest.text,
+          "",
+          `只能引用这些样段 ID：${digest.sampleIds.join("、")}`,
+          "",
+          "【候选正文】",
+          candidate,
+        ].join("\n");
+        let answer = "";
+        try {
+          answer = await askAI(reviewPrompt, "style_review");
+        } catch (reason) {
+          const message = reason instanceof Error ? reason.message : "复核失败。";
+          writeDraftRun(scope, { stage: "done", note: `复核未完成：${message}。已保留第一稿并标注未完成复核。`, ...lock, requests: 2, reviewed: false, at: new Date().toISOString() });
+          return { ok: true, note: "复核失败，已保留候选并标注未完成复核。" };
+        }
+        const review = parseStyleReview(answer, digest.sampleIds);
+        if (review.unparsed) {
+          writeDraftRun(scope, { stage: "done", note: "复核结果无法解析，已保留候选并标注未完成复核。", ...lock, requests: 2, reviewed: false, at: new Date().toISOString() });
+          return { ok: true, note: "复核结果无法解析，已保留候选并标注未完成复核。" };
+        }
+        const deviations = majorDeviationCount(review);
+        const step = advanceFidelityRun(state, { status: "ok", majorDeviations: deviations });
+        state = step.run;
+        if (step.action === "revise") {
+          const revisePrompt = [
+            sceneLine,
+            "只输出修订后的完整正文，不要解释。",
+            "",
+            "【需要修正的表达问题】",
+            ...review.items.filter((item) => item.severity === "major").map((item) => `- ${item.location}：${item.issue}`),
+            "",
+            "【候选正文】",
+            candidate,
+            "",
+            payload.ruleText,
+          ].join("\n");
+          try {
+            candidate = await askAI(revisePrompt, "chapter_write", { packet });
+            writeDraftRun(scope, { stage: "done", note: `已复核并修订一次（${deviations} 处主要偏差）。`, ...lock, revisions: 1, requests: 3, reviewed: true, at: new Date().toISOString() }, candidate);
+            return { ok: true, note: `已复核并修订一次：修正 ${deviations} 处主要偏差。` };
+          } catch (reason) {
+            const message = reason instanceof Error ? reason.message : "修订失败。";
+            writeDraftRun(scope, { stage: "done", note: `修订失败：${message}。已保留上一有效候选。`, ...lock, requests: 3, reviewed: true, at: new Date().toISOString() });
+            return { ok: true, note: "修订失败，已保留上一有效候选。" };
+          }
+        }
+        writeDraftRun(scope, { stage: "done", note: deviations ? `复核发现 ${deviations} 处主要偏差，未再修订，交由作者判断。` : "复核未发现主要偏差，保留当前候选。", ...lock, requests: 2, reviewed: true, at: new Date().toISOString() });
+        return { ok: true, note: deviations ? "复核发现主要偏差，已保留候选供你判断。" : "复核未发现主要偏差。" };
+      }
+      writeDraftRun(scope, { stage: "done", note: "没有可用样段，本次只生成候选，未做样段复核。", ...lock, requests: 1, reviewed: false, at: new Date().toISOString() });
+      return { ok: true, note: "没有可用样段，仅生成候选（可先导入样段再做复核）。" };
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "生成失败。";
+      writeDraftRun(scope, { stage: candidate ? "done" : "failed", note: `本阶段失败：${message}。已保留最后一次有效候选。`, ...lock, reviewed: false, at: new Date().toISOString() });
+      return { ok: false, note: "", error: candidate ? `生成中断：${message}（候选已保留）` : message };
+    }
+  }
+
   async function askAI(prompt: string, task = "chat", options?: PlotGenerationOptions) {
     if (requestController.current) throw new Error("已有生成任务，请等待完成或停止后重试。");
     const controller = new AbortController();
@@ -368,10 +496,17 @@ export default function Home() {
   function restoreBlueprintSnapshot(versionId: string) {
     const version = workspace.versions.find((item) => item.id === versionId);
     if (!version) return;
-    updateWorkspace((w) => ({ ...withSnapshot(w, "恢复前自动备份"), ...(version.snapshot ?? { idea: version.idea }) }));
+    const ref = version.snapshot?.styleConfig ?? null;
+    const resolution = resolveStyleConfigRef(ref, Object.values(workspace.styleProfileHistory).flat(), workspace.styleSamples);
+    updateWorkspace((w) => {
+      const next = { ...withSnapshot(w, "恢复前自动备份"), ...(version.snapshot ?? { idea: version.idea }) };
+      return ref && resolution.profile ? { ...next, styleProfiles: { ...next.styleProfiles, style: resolution.profile } } : next;
+    });
     setBooks((items) => items.map((b) => b.id === currentBook.id ? { ...b, premise: version.idea } : b));
-    setVersionsOpen(false); notify(`已恢复“${version.label}”`);
+    setVersionsOpen(false);
+    notify(ref ? `已恢复“${version.label}”。${resolution.note}` : `已恢复“${version.label}”`);
   }
+
 
   function adoptMessage() {
     const text = messages.at(-1)?.text;
@@ -553,6 +688,12 @@ export default function Home() {
         onGenerateStyle={(prompt) => askAI(prompt, "style_reference")}
         onTrialWrite={(ruleText) => askAI(trialPrompt(ruleText), "chapter_write", { packet: buildContextPacket({ workspace, target: { moduleId: "chapters", entityId: workspace.activeChapterId }, locks: workspace.locks }) })}
         onApplyStyle={applyStyleRules}
+        styleSamples={workspace.styleSamples}
+        styleProfile={workspace.styleProfiles.style ?? null}
+        onSamplesChange={updateStyleSamples}
+        onProfileChange={applyStyleProfile}
+        onGenerateProfile={(prompt) => askAI(prompt, "style_profile")}
+        onFidelityRun={runFidelity}
       />
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="workspace-dialog sm:max-w-[560px]"><DialogHeader><DialogTitle>在《{currentBook.title}》中查找</DialogTitle><DialogDescription>搜索设定内容、章节标题或正文，快速前往匹配的编辑器。借鉴资料请进入“借鉴库”。</DialogDescription></DialogHeader>
         <label className="workspace-search"><Search /><input value={workspaceSearch} onChange={(event) => setWorkspaceSearch(event.target.value)} placeholder="搜索世界观、人物、情节、正文……" autoFocus /></label>

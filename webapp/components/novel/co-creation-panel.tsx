@@ -237,8 +237,11 @@ export function CoCreationPanel({ bookId, workspace, target, busy, modelConnecti
       <div className="co-references">
         <header><strong>参考范围</strong><span>{packet.referenceScope ? `仅发送「${packet.referenceScope}」类借鉴 ${packet.references.length} 项` : `发送全部借鉴 ${packet.references.length} 项`}</span></header>
         <div className={`co-style-row ${packet.styleRules ? "" : "is-off"}`}><span>本次生效文风</span><strong>{packet.styleRules ? `第 ${packet.styleRules.version} 版 · ${packet.styleRules.text.length.toLocaleString()} 字规则` : "尚未应用文风"}</strong></div>
+        <div className={`co-style-row ${packet.styleContext ? "" : "is-off"}`}><span>场景匹配样段</span><strong>{packet.styleContext ? `${packet.styleContext.sampleIds.length} 段 · 档案第 ${packet.styleContext.profileVersion} 版 · ${packet.styleContext.chars.toLocaleString()} 字符` : "本次未携带真实样段"}</strong></div>
+        {packet.styleContext?.sampleIds.length ? <div className="co-style-row"><span>样段 ID</span><strong>{packet.styleContext.sampleIds.join("、")}</strong></div> : null}
         {workspace.references.filter((item) => !packet.referenceScope || item.scope === packet.referenceScope).slice(0, 5).map((item) => <div key={`${item.id}-${item.scope}`} className="co-reference-row"><span>{item.title}</span><button type="button" aria-label={`从本目标移除借鉴 ${item.title}`} title="只从本目标的参考范围移除，不会删除借鉴库中的资料" onClick={() => onRemoveReference(item)}><X /></button></div>)}
         {packet.trimming.map((note) => <p key={note} className="co-trimming" role="status">{note}</p>)}
+        {packet.styleContext?.trimming.map((note) => <p key={note} className="co-trimming" role="status">{note}</p>)}
         <Button variant="outline" size="sm" onClick={() => onOpenReferences((packet.referenceScope as ReferenceScope) ?? "plot")}>查看或增减借鉴</Button>
       </div>
       <label className="co-request"><span>本次要求</span><Textarea aria-label="本页生成要求" maxLength={4000} disabled={disabled} value={request} onChange={(event) => saveDraft(event.target.value)} placeholder={`想让 AI 为「${packet.targetLabel}」做什么？留空则按默认要求生成候选稿。`} onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); void run("candidate"); } }} /></label>
