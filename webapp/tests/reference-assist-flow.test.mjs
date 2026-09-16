@@ -98,9 +98,9 @@ test("one line becomes a plan, applying it changes the book style and the next c
   await act(pause);
   const chapterRun = runs.find((body) => body.task === "chapter_write");
   assert.ok(chapterRun, "a chapter write request was sent");
-  assert.ok(chapterRun.context.includes("【本次生效文风"), "the chapter request carries the adopted style block");
+  assert.ok(chapterRun.context.includes("【本书生效文风"), "the chapter request carries the adopted style block");
   assert.ok(chapterRun.context.includes(MODEL_RULE), "the adopted rule text is really in the request");
-  assert.ok(chapterRun.context.includes("只约束表达方式"), "style is scoped to wording, not to facts");
+  assert.ok(chapterRun.context.includes("【作者手写补充"), "the adopted plan rides the top-priority supplement channel");
   assert.ok(!runs.some((body) => body.task === "style_reference"), "the style model call happened before, not again");
 
   await act(async () => root.unmount()); await window.happyDOM.abort();

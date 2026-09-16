@@ -13,6 +13,7 @@ import { NativeSelect, NativeSelectOptGroup, NativeSelectOption } from "@/compon
 import { Textarea } from "@/components/ui/textarea";
 import { WorldlineWorkbench } from "@/components/novel/worldline-workbench";
 import { ReferenceWorkbench } from "@/components/novel/reference-workbench";
+import { StyleTemplateWorkbench } from "@/components/novel/style-template-workbench";
 import { AssetWorkbench } from "@/components/novel/asset-workbench";
 import { Bookshelf, initialBooks, type BookProject } from "@/components/novel/bookshelf";
 import { buildStoryContext, changeAsset, createBookWorkspace, mergeBookWorkspace, preparation, withSnapshot, type BookWorkspace, type PlotGenerationOptions, type StoryMessage } from "@/components/novel/book-workspace";
@@ -291,7 +292,10 @@ export default function Home() {
       proposalId: proposal.id, mode, snapshot: withSnapshot,
     });
     if ("error" in outcome) return { ok: false, error: outcome.error };
-    setWorkspaces((items) => ({ ...items, [currentBook.id]: outcome.workspace }));
+    // The effective style reads bookStyle, so an adopted plan lands there too:
+    // the full text stays in assets.style (book custom content, injected as the
+    // top-priority supplement) and the book switches to custom mode.
+    setWorkspaces((items) => ({ ...items, [currentBook.id]: { ...outcome.workspace, bookStyle: { mode: "custom", rules: [], updatedAt: new Date().toISOString() } } }));
     setBooks((items) => items.map((book) => book.id === currentBook.id ? { ...book, updatedAt: new Date().toISOString() } : book));
     notify(outcome.note);
     return { ok: true };
@@ -629,7 +633,7 @@ export default function Home() {
           <div className="module-tools"><span>创作工作区 / {currentLabel}</span><div><Button variant="outline" size="sm" onClick={() => setVersionsOpen(true)}><Clock3 />故事版本</Button>{active !== "timeline" && active !== "references" && <Button variant="outline" size="sm" aria-expanded={assistantVisible} onClick={() => setRightOpen(!assistantVisible)}><MessageCircleMore />{assistantVisible ? "收起共创助手" : "共创助手"}</Button>}</div></div>
           {generating && active !== "timeline" && <div className="module-task-status" role="status"><LoaderCircle className="spin" /><span>AI 正在生成，请稍候…</span><Button size="sm" variant="outline" onClick={() => requestController.current?.abort()}>停止生成</Button></div>}
           {aiError && active !== "timeline" && <p className="ai-error" role="alert">{aiError}</p>}
-          {active === "timeline" ? <WorldlineWorkbench key={currentBook.id} book={currentBook} workspace={workspace} busy={generating} saveState={saveState} connection={connection} onWorkspaceChange={updateWorkspace} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : active === "references" ? <ReferenceWorkbench title={currentBook.title} references={references} onAdd={openReferences} onRemove={removeReference} /> : active !== "overview" ? <AssetWorkbench key={`${currentBook.id}-${active}-${workspace.activeChapterId}`} book={currentBook} type={active} workspace={workspace} busy={generating} saveState={saveState} connection={connection} references={references} onWorkspaceChange={updateWorkspace} onContentChange={(content, snapshot) => updateWorkspace((w) => changeAsset(w, active, content, snapshot))} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} onGenerateProfile={(prompt) => askAI(prompt, "style_profile")} onFidelityRun={runFidelity} /> : <>
+          {active === "timeline" ? <WorldlineWorkbench key={currentBook.id} book={currentBook} workspace={workspace} busy={generating} saveState={saveState} connection={connection} onWorkspaceChange={updateWorkspace} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : active === "references" ? <><ReferenceWorkbench title={currentBook.title} references={references} onAdd={openReferences} onRemove={removeReference} /><StyleTemplateWorkbench bookId={currentBook.id} workspace={workspace} onWorkspaceChange={updateWorkspace} onGenerate={askAI} onFidelityRun={runFidelity} onNotify={notify} /></> : active !== "overview" ? <AssetWorkbench key={`${currentBook.id}-${active}-${workspace.activeChapterId}`} book={currentBook} type={active} workspace={workspace} busy={generating} saveState={saveState} connection={connection} references={references} onWorkspaceChange={updateWorkspace} onContentChange={(content, snapshot) => updateWorkspace((w) => changeAsset(w, active, content, snapshot))} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} onFidelityRun={runFidelity} onGoToLibrary={() => selectModule("references")} /> : <>
           <div className="page-heading">
             <div><div className="eyebrow">{currentBook.title} / {currentLabel}</div><h1>故事蓝图</h1><p>确定故事构想、核心卖点和创作偏好。</p></div>
 

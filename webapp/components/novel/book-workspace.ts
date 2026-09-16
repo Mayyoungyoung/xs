@@ -3,6 +3,7 @@ import type { ReferenceItem } from "./reference-library-dialog";
 import { getRoadmap, worldlineContext, type StoryRoadmap } from "@/lib/story-roadmap";
 import { normalizeLocks, normalizeProposals, normalizeThreads, normalizeView, type CoProposalRecord, type CoThreads, type ContextPacket, type LockMap } from "@/lib/co-creation";
 import { normalizeAssistDrafts, type AssistDraft } from "@/lib/reference-assist";
+import { migrateBookStyle, type BookStyleState } from "@/lib/book-style";
 import { buildStyleConfigRef, normalizeProfileHistory, normalizeStyleProfiles, normalizeStyleSamples, type StyleConfigRef, type StyleProfile, type StyleSample } from "@/lib/style-fidelity";
 
 export type StoryMessage = { role: "ai" | "user"; text: string };
@@ -79,8 +80,10 @@ export type BookWorkspace = {
   // profile it was produced from.
   styleProfileHistory: Record<string, StyleProfile[]>;
   // The profile generation currently writes with (a profile id). Empty when no
-  // profile has been created yet.
+  // profile has been created yet. Superseded by bookStyle, kept for migration.
   activeStyleProfileId: string;
+  // The book's applied style state: the single source of the effective style.
+  bookStyle: BookStyleState;
 };
 
 // Viewport/zoom preferences are stored per module and never touch revisions.
@@ -108,6 +111,7 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
     styleProfiles: {},
     styleProfileHistory: {},
     activeStyleProfileId: "",
+    bookStyle: { mode: "off", rules: [] },
     plot: {
       instruction: `为《${book.title}》设计一条围绕核心冲突展开的支线，在中段与主线交汇，并在结局前回收。`,
       branches: [],
@@ -122,7 +126,7 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
 
 // Input coming from storage, imports or the desktop bridge: content fields are
 // typed, while co-creation state arrives unvalidated and gets normalized below.
-export type SavedWorkspaceInput = Partial<Omit<BookWorkspace, "threads" | "coProposals" | "locks" | "view" | "referenceAssist" | "styleSamples" | "styleProfiles" | "styleProfileHistory">> & {
+export type SavedWorkspaceInput = Partial<Omit<BookWorkspace, "threads" | "coProposals" | "locks" | "view" | "referenceAssist" | "styleSamples" | "styleProfiles" | "styleProfileHistory" | "bookStyle">> & {
   threads?: unknown;
   coProposals?: unknown;
   locks?: unknown;
@@ -132,6 +136,7 @@ export type SavedWorkspaceInput = Partial<Omit<BookWorkspace, "threads" | "coPro
   styleProfiles?: unknown;
   styleProfileHistory?: unknown;
   activeStyleProfileId?: unknown;
+  bookStyle?: unknown;
 };
 
 export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInput | null): BookWorkspace {
@@ -153,6 +158,7 @@ export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInpu
     referenceAssist: normalizeAssistDrafts(saved.referenceAssist),
     styleSamples: normalizeStyleSamples(saved.styleSamples),
     ...migrateStyleProfiles(saved.styleProfiles, saved.styleProfileHistory, saved.activeStyleProfileId),
+    bookStyle: migrateBookStyle({ bookStyle: saved.bookStyle, activeStyleProfileId: saved.activeStyleProfileId, styleProfiles: saved.styleProfiles, assets: saved.assets }),
     plot: { ...base.plot, ...saved.plot, branches: saved.plot?.branches ?? base.plot.branches },
     versions: saved.versions?.length ? saved.versions : base.versions,
   };

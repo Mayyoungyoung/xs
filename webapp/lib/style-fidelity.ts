@@ -436,11 +436,12 @@ export type StyleProfile = {
 export const STYLE_PROFILE_PROMPT_VERSION = "style-profile-v1";
 export const MIN_SAMPLES_FOR_PROFILE = 3;
 
-// What a profile is called in the UI: the author or work it targets, else the
-// author's own note, else an honest placeholder.
+// What a profile is called in the UI: the author-given name first, then the
+// author/work target.
 export function profileDisplayName(profile: Pick<StyleProfile, "scope">): string {
+  if (profile.scope.note) return profile.scope.note;
   if (profile.scope.author && profile.scope.work) return `${profile.scope.author} · ${profile.scope.work}`;
-  return profile.scope.author || profile.scope.work || profile.scope.note || "自定义文风";
+  return profile.scope.author || profile.scope.work || "自定义文风";
 }
 
 export type BuildProfileInput = {

@@ -7,7 +7,19 @@ import { z } from "zod";
 import type { RoadmapEvent, Storyline, StoryRoadmap } from "./story-roadmap";
 import { chapterPlan, getRoadmap } from "./story-roadmap";
 import { roadmapSchema } from "./roadmap-schema";
-import { buildSceneSpec, buildStyleContext, profileDisplayName, selectStyleSamples, type StyleProfile, type StyleSample } from "./style-fidelity";
+import { buildSceneSpec, selectStyleSamples, type StyleProfile, type StyleSample } from "./style-fidelity";
+import { applyTemplate, migrateBookStyle, resolveEffectiveStyle } from "./book-style";
+
+// Legacy fallback for plain workspace objects without a bookStyle field (old
+// callers, tests, desktop payloads saved before this field existed). Same
+// derivation as storage migration: active profile -> template snapshot, else
+// assets.style -> custom rules.
+function effectiveStyleFor(workspace: WorkspaceLike, explicitId?: string) {
+  if (workspace.bookStyle !== undefined) return resolveEffectiveStyle(workspace.bookStyle, workspace.styleProfiles ?? {}, workspace.assets.style ?? "");
+  const legacy = activeStyleProfile(workspace, explicitId);
+  if (legacy.profile) return resolveEffectiveStyle(applyTemplate(legacy.profile), workspace.styleProfiles ?? {}, workspace.assets.style ?? "");
+  return resolveEffectiveStyle(migrateBookStyle({ assets: workspace.assets }), {}, workspace.assets.style ?? "");
+}
 
 export type CoModuleId = "overview" | "world" | "characters" | "style" | "outline" | "timeline" | "chapters" | "roadmap" | "event" | "line";
 
@@ -986,18 +998,21 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
   const settingsEntries = Object.entries(workspace.assets)
     .filter(([key, value]) => key !== target.moduleId && key !== "style" && Boolean(value?.trim()));
   const settingsText = settingsEntries.map(([key, value]) => `【${ASSET_LABELS[key] ?? key}】\n${value.slice(0, 14000)}`).join("\n\n");
-  // The adopted style is injected as its own labelled block (not via 相关设定) so
-  // every writing entry reads one authoritative, versioned set of rules and the
-  // author's own instructions, locks and book settings still take precedence.
-  const styleText = (workspace.assets.style ?? "").trim();
-  const styleRules = styleText ? { text: styleText.slice(0, 14000), version: (workspace.assetVersions?.style?.length ?? 0) + 1 } : null;
-  // The excerpt channel is built for prose targets only, from the active profile
-  // and the excerpts the author actually provided.
+  // One style source: resolveEffectiveStyle. Off contributes nothing; custom and
+  // template both land as the single 本书生效文风 block; the author's hand-written
+  // assets.style travels inside it as the top-priority supplement. Workspaces
+  // saved before bookStyle existed fall back to their legacy active profile.
+  const effective = effectiveStyleFor(workspace, input.activeStyleProfileId);
+  const styleRules = effective.text ? { text: effective.text, version: effective.version ?? 1 } : null;
+  // The excerpt channel is built for prose targets only, when a template is in
+  // force and the author provided excerpts for it.
   const sceneChapter = workspace.chapters[chapterIndex];
-  const active = manuscript ? activeStyleProfile(workspace, input.activeStyleProfileId) : { profile: null };
+  const template = effective.mode === "template" && effective.sampleTemplateId
+    ? Object.values(workspace.styleProfiles ?? {}).find((entry) => entry.id === effective.sampleTemplateId) ?? null
+    : null;
   const styleSamples = workspace.styleSamples ?? [];
   let styleContext: ContextPacket["styleContext"] = null;
-  if (manuscript && active.profile) {
+  if (manuscript && template && styleSamples.length) {
     const boundEventsOfChapter = (sceneChapter?.plotEventIds ?? [])
       .map((id) => roadmap.events.find((event) => event.id === id))
       .filter((event): event is RoadmapEvent => Boolean(event))
@@ -1015,23 +1030,27 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
       ...(prior.at(-1)?.content ? { previousChapterTail: prior.at(-1)!.content.slice(-500) } : {}),
     });
     // Samples get their own slice of the budget so they are never cut mid-excerpt
-    // by the packet assembler.
+    // by the packet assembler. Rules already travelled in 本书生效文风, so this
+    // block carries excerpts only — no duplicated rule text.
     const sampleBudget = Math.max(1200, Math.min(6000, Math.floor(budget * 0.25)));
-    const chosen = selectStyleSamples(active.profile, spec, styleSamples, { budgetChars: sampleBudget });
-    const built = buildStyleContext(active.profile, chosen.picks, styleText, sampleBudget);
+    const chosen = selectStyleSamples(template, spec, styleSamples, { budgetChars: sampleBudget });
+    const excerptText = chosen.picks.length ? [
+      "【真实样段（只提供表达参照：不得带入其中的人名、地名、能力体系、独特事件与成段语句；本书事实以本书内容为准）】",
+      ...chosen.picks.map((pick, index) => `样段 ${index + 1}〔${pick.sample.id}〕来源：${pick.sample.source.title || "未命名"}${pick.sample.source.author ? `｜作者：${pick.sample.source.author}` : ""}\n${pick.sample.text}`),
+    ].join("\n") : "";
     styleContext = {
-      text: built.text, sampleIds: built.sampleIds, profileId: active.profile.id,
-      profileVersion: active.profile.version, chars: built.chars, reservedChars: built.reservedChars,
-      trimming: [...chosen.notes, ...built.trimming],
+      text: excerptText, sampleIds: chosen.picks.map((pick) => pick.sample.id),
+      profileId: template.id,
+      profileVersion: effective.version ?? template.version,
+      chars: excerptText.length, reservedChars: excerptText.length,
+      trimming: [...chosen.notes],
     };
-  } else if (manuscript && active.reason) {
-    trimming.push(active.reason);
+  } else if (manuscript && effective.mode === "template" && !template) {
+    trimming.push(effective.notes.join("；"));
   }
-  // Rules are injected once: when the excerpt channel is present it already
-  // carries the author's rules, so the standalone block is skipped.
-  const stylePart = styleRules && target.moduleId !== "style" && !styleContext
-    ? `【本次生效文风 · 第 ${styleRules.version} 版（只约束表达方式）】\n${styleRules.text}\n（本书的人物、设定、锁定内容与作者本次明确要求优先于以上文风规则；参考风格不得改变已发生的情节。）`
-    : "";
+  // The style block is injected once for every writing target; non-writing
+  // modules (e.g. the style editor itself) do not condition on their own rules.
+  const stylePart = styleRules && target.moduleId !== "style" ? styleRules.text : "";
   const chapterPlan = target.moduleId === "chapters" ? chapterPlanText(workspace, target) : "";
   const eventText = targetEvent ? `【当前事件】\n${JSON.stringify({ id: targetEvent.id, title: targetEvent.title, note: targetEvent.note, chapter: targetEvent.chapter, order: targetEvent.order, status: targetEvent.status })}\n属于故事线：${roadmap.lines.filter((line) => line.eventIds.includes(targetEvent.id)).map((line) => line.title).join("、")}` : "";
   const lineText = targetLine ? `【当前故事线】\n${JSON.stringify({ id: targetLine.id, title: targetLine.title, goal: targetLine.goal, kind: targetLine.kind })}\n事件顺序：${targetLine.eventIds.map((id) => roadmap.events.find((event) => event.id === id)?.title ?? id).join(" → ")}` : "";
@@ -1073,8 +1092,8 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
     { label: "相关前文", detail: prior.length ? `${prior.map((chapter) => chapter.title).join("、")} 的末尾片段` : "本章是开篇，没有前文", included: prior.length > 0 },
     { label: "讨论摘要", detail: thread?.messages.length ? `最近 ${Math.min(thread.messages.length, 8)} 条` : "尚无讨论", included: Boolean(thread?.messages.length) },
     { label: "待采纳候选", detail: pending.length ? `${pending.length} 份会一起带上，便于继续修改` : "当前没有候选", included: pending.length > 0 },
-    { label: "本次生效文风", detail: styleContext && active.profile ? `${profileDisplayName(active.profile)} · 第 ${active.profile.version} 版${styleContext.sampleIds.length ? ` · ${styleContext.sampleIds.length} 段样段` : " · 无样段"}` : styleRules ? `手写文风说明 · ${styleRules.text.length} 字` : "尚未应用文风", included: Boolean(styleContext ?? styleRules) },
-    { label: "场景匹配样段", detail: styleContext ? (styleContext.sampleIds.length ? `${styleContext.sampleIds.length} 段 · 档案第 ${styleContext.profileVersion} 版` : "该档案没有可用样段，仅按规则生成") : active.reason ?? "本次未携带真实样段", included: Boolean(styleContext) },
+    { label: "本次生效文风", detail: effective.mode === "off" ? "文风指导已关闭" : `${effective.label}${effective.rules.length ? ` · ${effective.rules.length} 条规则` : ""}`, included: Boolean(styleRules) },
+    { label: "场景匹配样段", detail: styleContext ? (styleContext.sampleIds.length ? `${styleContext.sampleIds.length} 段 · 模板第 ${styleContext.profileVersion} 版` : "该模板没有匹配样段，仅按规则生成") : effective.mode === "template" ? "本次未携带真实样段" : "自定义或关闭模式不携带样段", included: Boolean(styleContext) },
     { label: "借鉴资料", detail: references.length ? `${references.length} 项（仅本模块范围）` : "本模块暂无借鉴", included: references.length > 0 },
     ...(trimming.length ? [{ label: "裁剪", detail: trimming.join("；"), included: true }] : []),
   ];
@@ -1131,6 +1150,7 @@ export type WorkspaceLike = {
   styleSamples?: StyleSample[];
   styleProfiles?: Record<string, StyleProfile>;
   activeStyleProfileId?: string;
+  bookStyle?: unknown;
 };
 
 // Targets whose request writes or rewrites prose: raw reference material is

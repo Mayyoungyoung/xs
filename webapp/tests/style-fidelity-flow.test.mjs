@@ -12,13 +12,9 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 window.HTMLElement.prototype.scrollIntoView = () => {};
 window.confirm = () => true;
 
-const SAMPLE_MARK = "屋檐的水线一直没有断过";
-const SAMPLE_TEXT = "雨从傍晚下到深夜，屋檐的水线一直没有断过。她把窗子推开一条缝，冷气挤进来，桌上的纸被吹到墙角。她走过去捡起来，顺手把灯调暗了一格。屋里只剩下钟摆的声音，一下，又一下。\n" +
-  "第二天早上，天放晴了。她把昨晚捡回来的纸摊在桌上，一行一行地看。字迹被水汽浸得发虚，有些地方已经看不清楚。她没有再去找人问，只是把纸收进抽屉，锁上。\n" +
-  "出门的时候，楼下的早点摊刚支起来。她买了一杯豆浆，站在路边喝完，然后往地铁站走。街上的人越来越多，没有人注意到她。";
-const MODEL_RULE = "情绪通过动作呈现，不直接解释心情。";
 const AUTHOR = "金庸";
-const WORK = "天龙八部";
+const DRAFT_RULE = "情绪变化优先通过动作、停顿和注意力转移呈现，减少直接使用情绪标签。";
+const BOOK_RULE = "本书专属：对白不超过三句一轮，关键信息藏在潜台词里。";
 
 const runs = [];
 globalThis.fetch = async (url, init) => {
@@ -26,9 +22,10 @@ globalThis.fetch = async (url, init) => {
   if (url === "/api/generate") {
     const body = JSON.parse(init.body);
     runs.push(body);
-    const ids = [...body.prompt.matchAll(/样段〔([^〕]+)〕/g)].map((match) => match[1]);
-    if (body.task === "style_profile") return Response.json({ content: JSON.stringify({ rules: [{ text: MODEL_RULE, evidenceIds: ids.slice(0, 1), scene: "daily" }, { text: "句长偏短，动作先于说明。", evidenceIds: ids.slice(1, 2) }], gaps: ["对话场景样段不足。"] }) });
-    return Response.json({ content: "候选正文。" });
+    if (body.task === "style_reference") {
+      return Response.json({ content: JSON.stringify({ rules: [DRAFT_RULE, "动作段落先交代动作，再表现直接后果，减少插入式解释。"], avoid: ["原作人名与情节"], gaps: ["对话场景需样段确认"] }) });
+    }
+    return Response.json({ content: "试写：他站在檐下没有动，雨顺着瓦当连成线。" });
   }
   throw new Error(`Unexpected request ${url}`);
 };
@@ -40,69 +37,79 @@ const pause = (ms = 60) => new Promise((resolve) => setTimeout(resolve, ms));
 const buttons = (label) => [...document.querySelectorAll("button")].filter((b) => b.textContent.trim() === label);
 const byLabel = (label) => document.querySelector(`[aria-label="${label}"]`);
 async function click(element) { assert.ok(element, "expected interactive element"); await act(async () => { element.dispatchEvent(new window.MouseEvent("click", { bubbles: true })); await pause(); }); }
-async function fill(element, value) { assert.ok(element, "expected editor"); await act(async () => { const proto = element.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, "value").set.call(element, value); element.dispatchEvent(new window.Event("input", { bubbles: true })); await pause(); }); }
+async function fill(element, value, label = "") { assert.ok(element, `expected editor ${label}`); await act(async () => { const proto = element.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, "value").set.call(element, value); element.dispatchEvent(new window.Event("input", { bubbles: true })); await pause(); }); }
 async function openBook(title) { await click([...document.querySelectorAll("article.book-card")].find((card) => card.textContent.includes(title))); }
 async function selectModule(label) { await click(buttons(label)[0]); }
 
-test("author path: name an author, import excerpts once, extract evidence-labelled rules, and the next chapter uses that profile", async () => {
+test("library makes a template, the style page picks and edits it, generation uses it", async () => {
   const host = document.createElement("div"); document.body.append(host);
   const root = createRoot(host);
   await act(async () => { root.render(createElement(Home)); await pause(); });
   await act(pause);
 
   await openBook("长安无梦");
+
+  // A. name-only path: a real model call drafts a rule-bearing template
+  await selectModule("借鉴库");
+  await click(buttons("新建模板")[0]);
+  await fill(byLabel("模板名称"), `金庸式武侠叙述`);
+  assert.equal(byLabel("模板名称").value, "金庸式武侠叙述", `name fill failed; got=${byLabel("模板名称")?.value}; count=${document.querySelectorAll('[aria-label="模板名称"]').length}`);
+  await fill(byLabel("参考作者或作品"), AUTHOR);
+  await fill(byLabel("借鉴偏好"), "减少修饰，多一些对白。");
+  assert.equal(runs.length, 0, "no model call before the author asks for a template");
+  const nameValue = byLabel("模板名称")?.value;
+  await click(buttons("生成模板")[0]);
+  await act(pause);
+  const nameInputs = [...document.querySelectorAll('input[aria-label="模板名称"]')].map((entry) => entry.value);
+  assert.ok(document.querySelector(".style-template-card"), `template card missing; nameBefore=${JSON.stringify(nameValue)}; nameInputs=${JSON.stringify(nameInputs)}; runs=${JSON.stringify(runs.map((body) => body.task))}`);
+  const draftCall = runs.find((body) => body.task === "style_reference");
+  assert.ok(draftCall, "the draft task really ran");
+  assert.ok(draftCall.prompt.includes(AUTHOR) && draftCall.prompt.includes("减少修饰"), "the target and preference travel into the prompt");
+  const card = [...document.querySelectorAll(".style-template-card")].find((entry) => entry.textContent.includes("金庸式武侠叙述"));
+  assert.ok(card, `the template appears in the library; cards=${[...document.querySelectorAll(".style-template-card")].map((entry) => entry.textContent.slice(0, 80)).join(" | ")}`);
+  assert.ok(card.textContent.includes(DRAFT_RULE.slice(0, 20)), "the drafted rules are real, not a name card");
+  assert.ok(card.textContent.includes("自定义") || card.textContent.includes(AUTHOR));
+  // Saving a template never changes the book by itself.
+  assert.ok(!document.querySelector(".style-template-card.is-active"), "not active until applied");
+
+  // C. the style page selects the saved template without re-entering anything
   await selectModule("文笔文风");
-  const styleBefore = byLabel("文笔文风编辑器").value;
+  const selector = byLabel("选择文风模板");
+  assert.ok(selector, "the style page offers a template selector");
+  const option = [...selector.options].find((entry) => entry.textContent.includes("金庸式武侠叙述"));
+  assert.ok(option, "the library template is directly selectable");
+  await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set.call(selector, option.value); selector.dispatchEvent(new window.Event("change", { bubbles: true })); await pause(); });
+  assert.ok(document.querySelector(".style-apply-panel").textContent.includes(DRAFT_RULE.slice(0, 20)), "the applied template's rules show as the book's working copy");
 
-  // 1. name the target author/work -> a profile card appears and becomes active
-  await fill(byLabel("目标作者"), AUTHOR);
-  await fill(byLabel("目标作品"), WORK);
-  await click(buttons("新建文风配置")[0]);
-  const card = document.querySelector(".style-profile-card");
-  assert.ok(card, "a profile card appears");
-  assert.ok(card.textContent.includes(AUTHOR) && card.textContent.includes(WORK), "the card is named after the target");
-  assert.ok(document.querySelector(".style-profile-badge"), "the first profile becomes active without an extra apply step");
-
-  // 2. one import action -> auto cleaned, split, tagged samples bound to this profile
-  await click(buttons("导入与管理样段（可选）")[0]);
-  await fill(byLabel("样段来源标题"), `《${WORK}》节选`);
-  await fill(byLabel("样段文本"), SAMPLE_TEXT);
-  await click(buttons("整理并加入样段库")[0]);
-  const sampleList = document.querySelector(".assist-sample-list");
-  assert.ok(sampleList, "the imported text becomes a sample library without per-segment forms");
-  assert.ok(sampleList.textContent.includes("条件"), "samples default to the conditioning split");
-  assert.equal(runs.length, 0, "no model call is made before the author asks for extraction");
-
-  // 3. extraction receives the real excerpts and keeps evidence ids
-  await click(buttons("从样段自动提取规则")[0]);
-  const profileCall = runs.find((body) => body.task === "style_profile");
-  assert.ok(profileCall, "the profile task is really called");
-  assert.ok(profileCall.prompt.includes(SAMPLE_MARK), "the analysis task receives the real excerpt text");
-  assert.ok(profileCall.prompt.includes(AUTHOR), "the target author travels into the extraction prompt");
-  const ruleBoxes = [...document.querySelectorAll(".assist-rules textarea")];
-  assert.ok(ruleBoxes.some((box) => box.value === MODEL_RULE), "the model rule is one of the editable rules");
-  assert.ok(ruleBoxes.some((box) => box.value.includes("句子以中短句为主")), "measured rules from the excerpts are present too");
-  assert.ok(document.querySelector(".assist-fidelity-panel").textContent.includes("证据："), "a cited rule shows its evidence id");
-
-  // 4. a hand-written rule survives and the editor text stays untouched
+  // D. a book-specific edit changes the working copy only
   await click(buttons("手写一条规则")[0]);
-  const boxes = [...document.querySelectorAll(".assist-rules textarea")];
-  await fill(boxes.at(-1), "对话不超过三句一轮。");
-  assert.equal(byLabel("文笔文风编辑器").value, styleBefore, "nothing is adopted automatically");
+  await fill(byLabel("本书文风规则 2"), BOOK_RULE);
+  await selectModule("借鉴库");
+  const libraryCard = [...document.querySelectorAll(".style-template-card")].find((entry) => entry.textContent.includes("金庸式武侠叙述"));
+  assert.ok(!libraryCard.textContent.includes(BOOK_RULE), "book edits never leak back into the library template");
 
-  // 5. the next chapter request carries the profile and matched excerpts directly
+  // G. the next generation request carries the final effective style
   runs.length = 0;
   await selectModule("章节正文");
   await fill(byLabel("本页生成要求"), "续写这一章");
   await click(buttons("生成预览")[0]);
   const chapterRun = runs.find((body) => body.task === "chapter_write");
   assert.ok(chapterRun, "the chapter task is really called");
-  assert.ok(chapterRun.context.includes("【真实样段"), "the chapter request carries matched excerpts");
-  assert.ok(chapterRun.context.includes("只提供表达参照"), "excerpts are scoped to expression only");
-  assert.ok(chapterRun.context.includes(AUTHOR), "the profile names the target author");
-  assert.match(chapterRun.context, /档案 v\d|第 \d 版/, "the request states the profile version");
-  assert.ok(chapterRun.context.includes("对话不超过三句一轮"), "the hand-written rule travels into the request");
-  assert.ok(byLabel("章节正文编辑器").value === "" || byLabel("章节正文编辑器").value === styleBefore, "the manuscript is only ever changed by adoption");
+  assert.ok(chapterRun.context.includes("【本书生效文风"), "the unified style block is injected");
+  assert.ok(chapterRun.context.includes(DRAFT_RULE), "template rules reach the request");
+  assert.ok(chapterRun.context.includes(BOOK_RULE), "book edits reach the request");
+  assert.ok(chapterRun.context.includes("不得引入参考作品的人名、地名"), "reference leakage is explicitly forbidden in the request");
+
+  // E/F. trial write previews without touching the manuscript
+  runs.length = 0;
+  await selectModule("文笔文风");
+  await fill(byLabel("试写场景"), "雨夜的车站");
+  await click(buttons("试写一段")[0]);
+  const trialCall = runs.find((body) => body.task === "chapter_write");
+  assert.ok(trialCall && trialCall.prompt.includes("【本书生效文风"), "the trial write uses the same effective style");
+  assert.ok(document.querySelector(".assist-sample"), "the trial result is a preview");
+  await selectModule("章节正文");
+  assert.equal(byLabel("章节正文编辑器").value, "", "trial writing never touches the manuscript");
 
   await act(async () => root.unmount()); await window.happyDOM.abort();
 });

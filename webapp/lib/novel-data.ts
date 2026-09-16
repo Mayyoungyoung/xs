@@ -112,6 +112,9 @@ export const workspaceSchema = storySchema.partial().extend({
   // The profile the book currently writes with. Absent on old backups: the
   // resolver then falls back to the legacy "style" key or a single entry.
   activeStyleProfileId: z.string().max(160).optional(),
+  // The book's applied style state (mode + pinned template + its own rule copy).
+  // Parsed tolerantly; derived from legacy fields when absent (see book-style.ts).
+  bookStyle: z.unknown().optional(),
 });
 const backupSchema = z.object({ version: z.union([z.literal(2), z.literal(3)]).optional(), books: z.array(bookSchema), workspaces: z.record(id, workspaceSchema).default({}) });
 

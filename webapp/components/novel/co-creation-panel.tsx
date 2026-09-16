@@ -8,10 +8,11 @@ import {
   ADOPT_MODE_LABELS, appendThreadMessage, availableAdoptModes, buildContextPacket, captureBaseFields,
   clearThread, defaultTaskFor, describeOpDiff, describeRoadmapOp, isLocked, isRoadmapProposal, makeRoadmapProposal,
   makeTextProposal, moduleText, parseRoadmapOps, setThreadDraft, splitCandidates, targetKey, toggleLock,
-  THREE_DIRECTIONS_HINT, activeStyleProfile, type AdoptMode, type CoProposalRecord, type CoTarget, type TextAnchor,
+  THREE_DIRECTIONS_HINT, type AdoptMode, type CoProposalRecord, type CoTarget, type TextAnchor,
 } from "@/lib/co-creation";
 import { getRoadmap } from "@/lib/story-roadmap";
 import { profileDisplayName } from "@/lib/style-fidelity";
+import { applyTemplate, resolveEffectiveStyle } from "@/lib/book-style";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import type { BookWorkspace, PlotGenerationOptions, StoryMessage } from "./book-workspace";
 import type { ReferenceItem, ReferenceScope } from "./reference-library-dialog";
@@ -70,7 +71,8 @@ export function CoCreationPanel({ bookId, workspace, target, busy, modelConnecti
   const packet = useMemo(() => buildContextPacket({ workspace, target, thread, locks: workspace.locks, selection: selection ?? null, pendingCandidates: pending }), [workspace, target, thread, selection, pending]);
   const locked = isLocked(workspace.locks, target);
   const styleProfiles = useMemo(() => Object.values(workspace.styleProfiles), [workspace.styleProfiles]);
-  const activeProfile = activeStyleProfile(workspace).profile;
+  const bookStyle = workspace.bookStyle;
+  const effective = resolveEffectiveStyle(bookStyle, workspace.styleProfiles, workspace.assets.style ?? "");
   const structured = ["roadmap", "event", "line"].includes(target.moduleId);
   const disabled = busy || running !== null;
   const messages = thread?.messages ?? [];
@@ -240,13 +242,14 @@ export function CoCreationPanel({ bookId, workspace, target, busy, modelConnecti
       </dl>
       <div className="co-references">
         <header><strong>参考范围</strong><span>{packet.referenceScope ? `仅发送「${packet.referenceScope}」类借鉴 ${packet.references.length} 项` : `发送全部借鉴 ${packet.references.length} 项`}</span></header>
-        {styleProfiles.length > 1 && <div className="co-style-row co-style-select"><span>切换文风配置</span>
-          <NativeSelect aria-label="切换文风配置" value={workspace.activeStyleProfileId} onChange={(event) => { onWorkspaceChange({ activeStyleProfileId: event.target.value }); onNotify(`生成正文将使用「${profileDisplayName(workspace.styleProfiles[event.target.value])}」的文风`); }}>
+        {styleProfiles.length > 1 && <div className="co-style-row co-style-select"><span>切换文风模板</span>
+          <NativeSelect aria-label="切换文风模板" value={bookStyle.mode === "template" ? bookStyle.templateId ?? "" : ""} onChange={(event) => { const profile = workspace.styleProfiles[event.target.value]; if (!profile) return; onWorkspaceChange({ bookStyle: applyTemplate(profile) }); onNotify(`生成正文将使用「${profileDisplayName(profile)}」第 ${profile.version} 版`); }}>
+            <NativeSelectOption value="">（当前非模板模式）</NativeSelectOption>
             {styleProfiles.map((profile) => <NativeSelectOption key={profile.id} value={profile.id}>{profileDisplayName(profile)} · 第 {profile.version} 版</NativeSelectOption>)}
           </NativeSelect>
         </div>}
-        <div className={`co-style-row ${packet.styleRules || packet.styleContext ? "" : "is-off"}`}><span>本次生效文风</span><strong>{packet.styleContext && activeProfile ? `${profileDisplayName(activeProfile)} · 第 ${packet.styleContext.profileVersion} 版${packet.styleContext.sampleIds.length ? ` · ${packet.styleContext.sampleIds.length} 段样段` : " · 无样段"}` : packet.styleRules ? `手写文风说明 · ${packet.styleRules.text.length.toLocaleString()} 字` : "尚未应用文风"}</strong></div>
-        <div className={`co-style-row ${packet.styleContext ? "" : "is-off"}`}><span>场景匹配样段</span><strong>{packet.styleContext ? `${packet.styleContext.sampleIds.length} 段 · 档案第 ${packet.styleContext.profileVersion} 版 · ${packet.styleContext.chars.toLocaleString()} 字符` : "本次未携带真实样段"}</strong></div>
+        <div className={`co-style-row ${packet.styleRules ? "" : "is-off"}`}><span>本次生效文风</span><strong>{effective.mode === "off" ? "文风指导已关闭" : `${effective.label}${effective.rules.length ? ` · ${effective.rules.length} 条规则` : ""}`}</strong></div>
+        <div className={`co-style-row ${packet.styleContext ? "" : "is-off"}`}><span>场景匹配样段</span><strong>{packet.styleContext ? (packet.styleContext.sampleIds.length ? `${packet.styleContext.sampleIds.length} 段 · 模板第 ${packet.styleContext.profileVersion} 版 · ${packet.styleContext.chars.toLocaleString()} 字符` : "该模板没有匹配样段") : "本次未携带真实样段"}</strong></div>
         {packet.styleContext?.sampleIds.length ? <div className="co-style-row"><span>样段 ID</span><strong>{packet.styleContext.sampleIds.join("、")}</strong></div> : null}
         {workspace.references.filter((item) => !packet.referenceScope || item.scope === packet.referenceScope).slice(0, 5).map((item) => <div key={`${item.id}-${item.scope}`} className="co-reference-row"><span>{item.title}</span><button type="button" aria-label={`从本目标移除借鉴 ${item.title}`} title="只从本目标的参考范围移除，不会删除借鉴库中的资料" onClick={() => onRemoveReference(item)}><X /></button></div>)}
         {packet.trimming.map((note) => <p key={note} className="co-trimming" role="status">{note}</p>)}

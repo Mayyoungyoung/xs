@@ -53,9 +53,10 @@ function workspaceWith(over = {}) {
 test("without an adopted profile the manuscript gets rules only, never excerpts", () => {
   const context = buildCoContext(workspaceWith({ styleProfiles: {}, styleSamples: [] }), { moduleId: "chapters", entityId: "c1" });
   assert.equal(context.styleContext, null);
-  assert.ok(context.text.includes("【本次生效文风"), "the adopted rules still reach the chapter");
+  assert.ok(context.text.includes("【本书生效文风"), "the book's custom rules still reach the chapter");
+  assert.ok(context.text.includes("保持第三人称，不要抒情。"), "assets.style is preserved as the book's custom rule");
   assert.ok(!context.text.includes("真实样段"));
-  assert.equal(context.styleRules?.version, 2);
+  assert.equal(context.styleRules?.version, 1);
 });
 
 test("an adopted profile puts matched excerpts into the chapter request only through styleContext", () => {
@@ -66,10 +67,10 @@ test("an adopted profile puts matched excerpts into the chapter request only thr
   for (const id of context.styleContext.sampleIds) assert.ok(context.text.includes(id), `excerpt ${id} is really in the packet`);
   assert.ok(context.text.includes("只提供表达参照"));
   assert.ok(context.text.includes("不得带入其中的人名、地名"));
-  // The author rules appear exactly once: the excerpt channel carries them, so the
-  // standalone block is not duplicated.
+  // The author's hand-written supplement appears exactly once, at top priority in
+  // the effective style block; the excerpt block carries excerpts only.
   assert.equal(context.text.split("保持第三人称，不要抒情。").length - 1, 1);
-  assert.equal(context.text.split("【作者确认规则（最高优先，不得被样段推翻）】").length - 1, 1);
+  assert.equal(context.text.split("【作者手写补充（最高优先，不得被下方规则推翻）】").length - 1, 1);
   // Raw style material is not smuggled in through the reference channel.
   assert.ok(!context.references.some((reference) => reference.kind === "local" && reference.summary.includes("屋檐")));
 });
@@ -103,10 +104,10 @@ test("a long context keeps the rules and reports every cut instead of a blind ta
       { id: "c1", title: "第 1 章", content: "林晚站在雨中。", plotEventIds: ["e1"] },
     ],
     activeChapterId: "c1",
-  }), target: { moduleId: "chapters", entityId: "c1" }, budget: 6000 });
+  }), target: { moduleId: "chapters", entityId: "c1" }, budget: 5000 });
   assert.ok(context.text.length <= 6200, `assembled ${context.text.length}`);
   assert.ok(context.text.includes("【本次目标】") && context.text.includes("【当前内容】"), "critical blocks survive");
-  assert.ok(context.text.includes("只提供表达参照") || context.text.includes("【本次生效文风"), "style material survives");
+  assert.ok(context.text.includes("只提供表达参照") || context.text.includes("【本书生效文风"), "style material survives");
   assert.ok(context.trimming.some((line) => line.includes("省略") || line.includes("截断")), JSON.stringify(context.trimming));
   assert.ok(!context.text.includes("…（已裁剪）\n…（已裁剪）"), "no repeated blind cut marker");
 });
