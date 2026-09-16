@@ -14,6 +14,9 @@ import { ChapterRoadmap } from "./chapter-roadmap";
 import { anchorFromRange, type CoModuleId, type CoTarget, type TextAnchor } from "@/lib/co-creation";
 import type { AdoptOptions, AdoptOutcome } from "./co-creation-panel";
 import { CoCreationPanel } from "./co-creation-panel";
+import { StyleProfileManager } from "./style-profile-manager";
+import type { StyleProfile } from "@/lib/style-fidelity";
+import type { FidelityRunResult } from "./style-fidelity-panel";
 
 type Props = {
   embedded?: boolean;
@@ -28,6 +31,9 @@ type Props = {
   onAdopt: (proposalId: string, options: AdoptOptions) => AdoptOutcome;
   onCancel: () => void;
   onNotify: (message: string) => void;
+  // Style-module only: model access and the bounded fidelity run come from the page.
+  onGenerateProfile?: (prompt: string) => Promise<string>;
+  onFidelityRun?: (payload: { ruleText: string; profile: StyleProfile | null; sceneRange: "selection" | "chapter" }) => Promise<FidelityRunResult>;
 };
 type LocalDirectoryHandle = {
   getFileHandle: (name: string, options: { create: boolean }) => Promise<{ createWritable: () => Promise<{ write: (data: string) => Promise<void>; close: () => Promise<void> }> }>;
@@ -40,7 +46,7 @@ const configs: Record<string, { title: string; desc: string; icon: typeof Box; s
   outline: { title: "卷章大纲", desc: "把主支线落实为章节冲突、转折与钩子。", icon: Library, scope: "plot", task: "outline_design" },
   chapters: { title: "章节正文", desc: "按章节写作，参考设定和前文，预览后采纳生成内容。", icon: BookOpen, scope: "plot", task: "chapter_write" },
 };
-export function AssetWorkbench({ embedded = false, book, type, workspace, busy, saveState, connection, references, onContentChange, onWorkspaceChange, onOpenReferences, onRemoveReference, onGenerate, onAdopt, onCancel, onNotify }: Props) {
+export function AssetWorkbench({ embedded = false, book, type, workspace, busy, saveState, connection, references, onContentChange, onWorkspaceChange, onOpenReferences, onRemoveReference, onGenerate, onAdopt, onCancel, onNotify, onGenerateProfile, onFidelityRun }: Props) {
   const config = configs[type] ?? configs.world;
   const Icon = config.icon;
   const [savingLocal, setSavingLocal] = useState(false);
@@ -125,6 +131,14 @@ export function AssetWorkbench({ embedded = false, book, type, workspace, busy, 
         <footer><span><Check />{saveState}</span><span>{wordCount(editorContent).toLocaleString()} 字</span></footer>
       </div>
       {error && <p className="ai-error" role="alert">{error}</p>}
+      {type === "style" && onGenerateProfile && onFidelityRun && <StyleProfileManager
+        bookId={book.id}
+        workspace={workspace}
+        onWorkspaceChange={onWorkspaceChange}
+        onGenerateProfile={onGenerateProfile}
+        onFidelityRun={onFidelityRun}
+        onNotify={onNotify}
+      />}
       {type === "chapters" && <div className="chapter-ai-actions"><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={requestPolish}>润色本章</Button><Button variant="outline" disabled={busy || !editorContent.trim()} onClick={() => void reviewChapter()}>连续性检查</Button></div>}
       {review && <section className="generation-preview"><h2>连续性审查</h2><div className="review-text">{review}</div><Button variant="outline" onClick={() => downloadText(review, `${book.title}-${chapter.title}-审查.md`)}>导出审查</Button></section>}
     </div><aside className="asset-side">

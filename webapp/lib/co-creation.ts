@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { RoadmapEvent, Storyline, StoryRoadmap } from "./story-roadmap";
 import { chapterPlan, getRoadmap } from "./story-roadmap";
 import { roadmapSchema } from "./roadmap-schema";
-import { buildSceneSpec, buildStyleContext, selectStyleSamples, type StyleProfile, type StyleSample } from "./style-fidelity";
+import { buildSceneSpec, buildStyleContext, profileDisplayName, selectStyleSamples, type StyleProfile, type StyleSample } from "./style-fidelity";
 
 export type CoModuleId = "overview" | "world" | "characters" | "style" | "outline" | "timeline" | "chapters" | "roadmap" | "event" | "line";
 
@@ -997,7 +997,7 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
   const active = manuscript ? activeStyleProfile(workspace, input.activeStyleProfileId) : { profile: null };
   const styleSamples = workspace.styleSamples ?? [];
   let styleContext: ContextPacket["styleContext"] = null;
-  if (manuscript && active.profile && styleSamples.length) {
+  if (manuscript && active.profile) {
     const boundEventsOfChapter = (sceneChapter?.plotEventIds ?? [])
       .map((id) => roadmap.events.find((event) => event.id === id))
       .filter((event): event is RoadmapEvent => Boolean(event))
@@ -1073,6 +1073,8 @@ export function buildContextPacket(input: PacketInput): ContextPacket {
     { label: "相关前文", detail: prior.length ? `${prior.map((chapter) => chapter.title).join("、")} 的末尾片段` : "本章是开篇，没有前文", included: prior.length > 0 },
     { label: "讨论摘要", detail: thread?.messages.length ? `最近 ${Math.min(thread.messages.length, 8)} 条` : "尚无讨论", included: Boolean(thread?.messages.length) },
     { label: "待采纳候选", detail: pending.length ? `${pending.length} 份会一起带上，便于继续修改` : "当前没有候选", included: pending.length > 0 },
+    { label: "本次生效文风", detail: styleContext && active.profile ? `${profileDisplayName(active.profile)} · 第 ${active.profile.version} 版${styleContext.sampleIds.length ? ` · ${styleContext.sampleIds.length} 段样段` : " · 无样段"}` : styleRules ? `手写文风说明 · ${styleRules.text.length} 字` : "尚未应用文风", included: Boolean(styleContext ?? styleRules) },
+    { label: "场景匹配样段", detail: styleContext ? (styleContext.sampleIds.length ? `${styleContext.sampleIds.length} 段 · 档案第 ${styleContext.profileVersion} 版` : "该档案没有可用样段，仅按规则生成") : active.reason ?? "本次未携带真实样段", included: Boolean(styleContext) },
     { label: "借鉴资料", detail: references.length ? `${references.length} 项（仅本模块范围）` : "本模块暂无借鉴", included: references.length > 0 },
     ...(trimming.length ? [{ label: "裁剪", detail: trimming.join("；"), included: true }] : []),
   ];
@@ -1128,6 +1130,7 @@ export type WorkspaceLike = {
   assetVersions?: Record<string, Array<{ id: string }>>;
   styleSamples?: StyleSample[];
   styleProfiles?: Record<string, StyleProfile>;
+  activeStyleProfileId?: string;
 };
 
 // Targets whose request writes or rewrites prose: raw reference material is
@@ -1162,13 +1165,16 @@ export function assembleByPriority(blocks: BudgetBlock[], budget: number, trimmi
   return kept.map((block) => block.text).join("\n\n");
 }
 
-// The profile in force for the book style. Explicit id first, then the book-style
-// key, then a single unambiguous entry — never a silent guess between several.
+// The profile in force for the book style. Explicit id first, then the book's
+// persisted choice, then the legacy "style" key, then a single unambiguous
+// entry — never a silent guess between several.
 export function activeStyleProfile(workspace: WorkspaceLike, explicitId?: string): { profile: StyleProfile | null; reason?: string } {
   const profiles = workspace.styleProfiles ?? {};
   const entries = Object.entries(profiles);
   if (!entries.length) return { profile: null };
   if (explicitId && profiles[explicitId]) return { profile: profiles[explicitId] };
+  const persisted = workspace.activeStyleProfileId ?? "";
+  if (persisted && profiles[persisted]) return { profile: profiles[persisted] };
   if (profiles.style) return { profile: profiles.style };
   if (entries.length === 1) return { profile: entries[0][1] };
   return { profile: null, reason: `本书有 ${entries.length} 份风格档案但没有指定生效档案，本次不携带样段。` };

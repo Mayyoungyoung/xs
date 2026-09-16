@@ -630,4 +630,24 @@ input,textarea,select { color: #302d29; }
 .assist-diff-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .assist-diff small { color: #9a948a; font-size: 10px; }
 .reference-evidence-note { display: block; margin-top: 4px; color: #8a6a3a; font-size: 10px; }
-@media (max-width: 680px) { .assist-lists, .assist-diff-body { grid-template-columns: 1fr; } }
+.style-profile-manager { display: grid; gap: 12px; border: 1px solid #e5e2dc; border-radius: 13px; background: #fff; padding: 16px; }
+.style-profile-manager > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.style-profile-manager > header strong { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+.style-profile-manager > header small { display: block; margin-top: 2px; color: #9a948a; font-size: 11px; }
+.style-profile-active-tag { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 999px; background: #f3ede2; color: #7f302a; font-size: 11px; }
+.style-profile-active-tag.is-off { color: #9a948a; background: #f4f2ee; }
+.style-profile-create { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)) auto; gap: 10px; align-items: end; }
+.style-profile-create label { display: grid; gap: 4px; }
+.style-profile-create span { font-size: 11px; color: #6f6a61; }
+.style-profile-create input { border: 1px solid #d8d3c9; border-radius: 8px; padding: 7px 10px; font-size: 13px; background: #fff; }
+.style-profile-list { display: grid; gap: 8px; }
+.style-profile-card { display: flex; align-items: center; gap: 10px; border: 1px solid #e5e2dc; border-radius: 10px; padding: 8px 12px; background: #fbfaf7; }
+.style-profile-card.is-active { border-color: #b96357; background: #faf3ef; }
+.style-profile-card.is-selected { outline: 2px solid #d9c3a5; }
+.style-profile-card-main { flex: 1; display: grid; gap: 2px; text-align: left; background: none; border: none; cursor: pointer; padding: 0; }
+.style-profile-card-main strong { font-size: 13px; color: #2f2a24; }
+.style-profile-card-main small { color: #9a948a; font-size: 10px; }
+.style-profile-badge { display: inline-flex; align-items: center; gap: 3px; color: #7f302a; font-size: 11px; }
+.assist-rule-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.co-style-select { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 8px; }
+@media (max-width: 680px) { .assist-lists, .assist-diff-body { grid-template-columns: 1fr; } .style-profile-create { grid-template-columns: 1fr; } }

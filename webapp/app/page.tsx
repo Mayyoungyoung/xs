@@ -31,8 +31,8 @@ import { CUSTOM_PROVIDER_ID, DEFAULT_PROVIDER_ID, PROVIDERS, providerById, short
 import { applyProposalTransaction, buildContextPacket, makeTextProposal, MODULE_LABELS, targetKey, type CoTarget } from "@/lib/co-creation";
 import { emptyAssistDraft, type AssistRun } from "@/lib/reference-assist";
 import {
-  advanceFidelityRun, appendProfileVersion, buildSampleDigest, majorDeviationCount, parseStyleReview,
-  resolveStyleConfigRef, sampleManifest, startFidelityRun, type StyleProfile,
+  advanceFidelityRun, buildSampleDigest, dedupeSamples, importTextAsSamples,
+  majorDeviationCount, parseStyleReview, resolveStyleConfigRef, sampleManifest, startFidelityRun, type StyleProfile,
 } from "@/lib/style-fidelity";
 import type { AdoptOptions, AdoptOutcome } from "@/components/novel/co-creation-panel";
 
@@ -314,17 +314,21 @@ export default function Home() {
     ].join("\n");
   }
 
-  function updateStyleSamples(next: BookWorkspace["styleSamples"]) {
-    updateWorkspace((w) => ({ ...w, styleSamples: next }));
-  }
-
-  function applyStyleProfile(profile: StyleProfile) {
-    updateWorkspace((w) => ({
-      ...w,
-      styleProfiles: { ...w.styleProfiles, [profile.targetId]: profile },
-      styleProfileHistory: { ...w.styleProfileHistory, [profile.targetId]: appendProfileVersion(w.styleProfileHistory[profile.targetId] ?? [], profile) },
-    }));
-    notify(`风格档案已更新到第 ${profile.version} 版；旧版本保留，可随故事快照恢复`);
+  // Style-scope imports from the reference dialog land in the active profile's
+  // sample library — one store, no parallel copy in 借鉴资料.
+  function importStyleText(title: string, text: string): { ok: boolean; note?: string; error?: string } {
+    const profileId = workspace.activeStyleProfileId;
+    const profile = workspace.styleProfiles[profileId];
+    if (!profile) return { ok: false, error: "还没有文风配置：请先到「文笔文风」页新建（可只填作者名），再导入样段。" };
+    const result = importTextAsSamples({
+      bookId: currentBook.id, targetId: profile.targetId, raw: text,
+      source: { kind: "primary_excerpt", title, usageBasis: "unknown", author: profile.scope.author || undefined, work: profile.scope.work || undefined },
+    });
+    if (!result.samples.length) return { ok: false, error: "没有整理出可用样段：文本太短或全是模板行。" };
+    const bound = workspace.styleSamples.filter((sample) => sample.targetId === profile.targetId);
+    const merged = dedupeSamples([...bound, ...result.samples]);
+    updateWorkspace((w) => ({ ...w, styleSamples: [...w.styleSamples.filter((sample) => sample.targetId !== profile.targetId), ...merged.kept] }));
+    return { ok: true, note: `已加入「${profile.scope.author || profile.scope.work || "当前文风"}」的样段库：${merged.kept.length - bound.length} 段。` };
   }
 
   function writeDraftRun(scope: ReferenceScope, run: AssistRun | null, sample?: string) {
@@ -341,7 +345,8 @@ export default function Home() {
   }
 
   async function runFidelity(payload: { ruleText: string; profile: StyleProfile | null; sceneRange: "selection" | "chapter" }): Promise<{ ok: boolean; note: string; error?: string }> {
-    const scope = referenceScope;
+    // The fidelity run only lives on the 文笔文风 page now.
+    const scope: ReferenceScope = "style";
     const latest = mergeBookWorkspace(currentBook, workspacesRef.current[currentBook.id]);
     const chapterId = latest.activeChapterId;
     const chapter = latest.chapters.find((item) => item.id === chapterId);
@@ -500,7 +505,7 @@ export default function Home() {
     const resolution = resolveStyleConfigRef(ref, Object.values(workspace.styleProfileHistory).flat(), workspace.styleSamples);
     updateWorkspace((w) => {
       const next = { ...withSnapshot(w, "恢复前自动备份"), ...(version.snapshot ?? { idea: version.idea }) };
-      return ref && resolution.profile ? { ...next, styleProfiles: { ...next.styleProfiles, style: resolution.profile } } : next;
+      return ref && resolution.profile ? { ...next, styleProfiles: { ...next.styleProfiles, [resolution.profile.id]: resolution.profile }, activeStyleProfileId: resolution.profile.id } : next;
     });
     setBooks((items) => items.map((b) => b.id === currentBook.id ? { ...b, premise: version.idea } : b));
     setVersionsOpen(false);
@@ -624,7 +629,7 @@ export default function Home() {
           <div className="module-tools"><span>创作工作区 / {currentLabel}</span><div><Button variant="outline" size="sm" onClick={() => setVersionsOpen(true)}><Clock3 />故事版本</Button>{active !== "timeline" && active !== "references" && <Button variant="outline" size="sm" aria-expanded={assistantVisible} onClick={() => setRightOpen(!assistantVisible)}><MessageCircleMore />{assistantVisible ? "收起共创助手" : "共创助手"}</Button>}</div></div>
           {generating && active !== "timeline" && <div className="module-task-status" role="status"><LoaderCircle className="spin" /><span>AI 正在生成，请稍候…</span><Button size="sm" variant="outline" onClick={() => requestController.current?.abort()}>停止生成</Button></div>}
           {aiError && active !== "timeline" && <p className="ai-error" role="alert">{aiError}</p>}
-          {active === "timeline" ? <WorldlineWorkbench key={currentBook.id} book={currentBook} workspace={workspace} busy={generating} saveState={saveState} connection={connection} onWorkspaceChange={updateWorkspace} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : active === "references" ? <ReferenceWorkbench title={currentBook.title} references={references} onAdd={openReferences} onRemove={removeReference} /> : active !== "overview" ? <AssetWorkbench key={`${currentBook.id}-${active}-${workspace.activeChapterId}`} book={currentBook} type={active} workspace={workspace} busy={generating} saveState={saveState} connection={connection} references={references} onWorkspaceChange={updateWorkspace} onContentChange={(content, snapshot) => updateWorkspace((w) => changeAsset(w, active, content, snapshot))} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : <>
+          {active === "timeline" ? <WorldlineWorkbench key={currentBook.id} book={currentBook} workspace={workspace} busy={generating} saveState={saveState} connection={connection} onWorkspaceChange={updateWorkspace} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} /> : active === "references" ? <ReferenceWorkbench title={currentBook.title} references={references} onAdd={openReferences} onRemove={removeReference} /> : active !== "overview" ? <AssetWorkbench key={`${currentBook.id}-${active}-${workspace.activeChapterId}`} book={currentBook} type={active} workspace={workspace} busy={generating} saveState={saveState} connection={connection} references={references} onWorkspaceChange={updateWorkspace} onContentChange={(content, snapshot) => updateWorkspace((w) => changeAsset(w, active, content, snapshot))} onOpenReferences={openReferences} onRemoveReference={removeReference} onGenerate={askAI} onAdopt={adoptProposal} onCancel={() => requestController.current?.abort()} onNotify={notify} onGenerateProfile={(prompt) => askAI(prompt, "style_profile")} onFidelityRun={runFidelity} /> : <>
           <div className="page-heading">
             <div><div className="eyebrow">{currentBook.title} / {currentLabel}</div><h1>故事蓝图</h1><p>确定故事构想、核心卖点和创作偏好。</p></div>
 
@@ -688,12 +693,7 @@ export default function Home() {
         onGenerateStyle={(prompt) => askAI(prompt, "style_reference")}
         onTrialWrite={(ruleText) => askAI(trialPrompt(ruleText), "chapter_write", { packet: buildContextPacket({ workspace, target: { moduleId: "chapters", entityId: workspace.activeChapterId }, locks: workspace.locks }) })}
         onApplyStyle={applyStyleRules}
-        styleSamples={workspace.styleSamples}
-        styleProfile={workspace.styleProfiles.style ?? null}
-        onSamplesChange={updateStyleSamples}
-        onProfileChange={applyStyleProfile}
-        onGenerateProfile={(prompt) => askAI(prompt, "style_profile")}
-        onFidelityRun={runFidelity}
+        onImportStyleText={importStyleText}
       />
       <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="workspace-dialog sm:max-w-[560px]"><DialogHeader><DialogTitle>在《{currentBook.title}》中查找</DialogTitle><DialogDescription>搜索设定内容、章节标题或正文，快速前往匹配的编辑器。借鉴资料请进入“借鉴库”。</DialogDescription></DialogHeader>
         <label className="workspace-search"><Search /><input value={workspaceSearch} onChange={(event) => setWorkspaceSearch(event.target.value)} placeholder="搜索世界观、人物、情节、正文……" autoFocus /></label>

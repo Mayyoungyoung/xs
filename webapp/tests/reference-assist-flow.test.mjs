@@ -50,8 +50,9 @@ test("one line becomes a plan, applying it changes the book style and the next c
   await act(pause);
 
   await openBook("长安无梦");
-  await selectModule("文笔文风");
-  const styleBefore = byLabel("文笔文风编辑器").value;
+  // The StylePlan assist flow lives on the non-style scopes now; 世界观 is one.
+  await selectModule("世界观");
+  const worldBefore = byLabel("世界观编辑器").value;
   assert.equal(document.querySelector('[role="dialog"]'), null, "the dialog starts closed");
 
   // 默认入口是 AI 帮我借鉴
@@ -74,7 +75,7 @@ test("one line becomes a plan, applying it changes the book style and the next c
 
   // 未经采纳不影响正文与正式文风
   await click(buttons("完成")[0]);
-  assert.equal(byLabel("文笔文风编辑器").value, styleBefore, "an unadopted plan never becomes the book style");
+  assert.equal(byLabel("世界观编辑器").value, worldBefore, "an unadopted plan never becomes the book style");
   await click(buttons("添加")[0]);
 
   // 应用前先看差异，再替换
@@ -84,6 +85,7 @@ test("one line becomes a plan, applying it changes the book style and the next c
   await act(pause);
   await click(buttons("完成")[0]);
 
+  await selectModule("文笔文风");
   const styleText = byLabel("文笔文风编辑器").value;
   assert.ok(styleText.startsWith("【借鉴对象】"), "the applied plan is written as the book style");
   assert.ok(styleText.includes(MODEL_RULE), "the refined rules are what got applied");
@@ -113,10 +115,12 @@ test("locking the style target blocks applying a plan, and nothing is written", 
   await selectModule("文笔文风");
   const styleBefore = byLabel("文笔文风编辑器").value;
 
-  // 锁住文笔文风目标
+  // 锁住文笔文风目标（文风写入走 style 目标的事务，锁必须拦得住）
   await click(buttons("锁定")[0]);
   await act(pause);
 
+  // 从世界观范围发起借鉴并应用：写入的是文风目标，仍受锁约束
+  await selectModule("世界观");
   await click(buttons("添加")[0]);
   await fill(byLabel("借鉴要求"), "参考余华的文笔");
   await click(buttons("生成借鉴方案")[0]);
@@ -127,6 +131,7 @@ test("locking the style target blocks applying a plan, and nothing is written", 
   const error = document.querySelector(".reference-error");
   assert.ok(error && error.textContent.includes("锁定"), `expected a lock error, got ${error?.textContent}`);
   await click(buttons("完成")[0]);
+  await selectModule("文笔文风");
   assert.equal(byLabel("文笔文风编辑器").value, styleBefore, "a locked target is never overwritten");
 
   await act(async () => root.unmount()); await window.happyDOM.abort();

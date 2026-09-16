@@ -44,7 +44,7 @@ const styleSampleSchema = z.object({
 const styleRuleSchema = z.object({
   id: z.string().max(160), text: z.string().max(400),
   layer: z.enum(["mechanical", "semantic", "chapter"]),
-  origin: z.enum(["primary_excerpt", "critical_analysis", "bibliographic_metadata", "model_prior", "user_approved_output"]),
+  origin: z.enum(["primary_excerpt", "critical_analysis", "bibliographic_metadata", "model_prior", "user_approved_output", "author_written"]),
   evidenceIds: z.array(z.string().max(160)).max(40),
 });
 const styleProfileSchema = z.object({
@@ -109,6 +109,9 @@ export const workspaceSchema = storySchema.partial().extend({
   // Append-only profile history: a snapshot or candidate may still point at an
   // older version, so superseded versions are kept rather than overwritten.
   styleProfileHistory: z.record(z.string(), z.array(styleProfileSchema).max(20)).optional(),
+  // The profile the book currently writes with. Absent on old backups: the
+  // resolver then falls back to the legacy "style" key or a single entry.
+  activeStyleProfileId: z.string().max(160).optional(),
 });
 const backupSchema = z.object({ version: z.union([z.literal(2), z.literal(3)]).optional(), books: z.array(bookSchema), workspaces: z.record(id, workspaceSchema).default({}) });
 

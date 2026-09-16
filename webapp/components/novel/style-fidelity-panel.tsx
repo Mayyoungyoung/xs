@@ -1,32 +1,32 @@
 "use client";
 
-// The author-facing half of the sample-driven style flow. Everything here is
-// already produced by lib/style-fidelity.ts pure functions: importing text is one
-// action, the profile is derived from real excerpts, and the review/revise loop is
-// bounded. Advanced detail (statistics, evaluation split) stays collapsed so the
+// The author-facing half of the sample-driven style flow, bound to ONE named
+// profile (an author, a work or a custom name). Everything here is produced by
+// lib/style-fidelity.ts pure functions: importing text is one action, the
+// profile is derived from real excerpts, rules can also be hand-written, and
+// the review/revise loop is bounded. Advanced detail stays collapsed so the
 // author is not asked to understand the internal data model first.
 
 import { useMemo, useRef, useState } from "react";
-import { BookMarked, ChevronDown, FileText, LoaderCircle, Sparkles, Trash2, Upload, WandSparkles } from "lucide-react";
+import { BookMarked, ChevronDown, FileText, LoaderCircle, Plus, Sparkles, Trash2, Upload, WandSparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import {
-  EVIDENCE_KIND_LABELS, SCENE_LABELS, SPLIT_LABELS, USAGE_BASIS_LABELS, buildSampleDigest, buildStyleProfile,
-  dedupeSamples, importTextAsSamples, parseProfileRules, partitionSamples, profileRulesToText,
+  EVIDENCE_KIND_LABELS, RULE_ORIGIN_LABELS, SCENE_LABELS, SPLIT_LABELS, USAGE_BASIS_LABELS,
+  buildSampleDigest, buildStyleProfile, dedupeSamples, importTextAsSamples, parseProfileRules,
+  partitionSamples, profileDisplayName, profileRulesToText,
   type SampleSplit, type StyleEvidenceKind, type StyleProfile, type StyleSample, type SampleUsageBasis,
 } from "@/lib/style-fidelity";
 import type { AssistRun } from "@/lib/reference-assist";
-import type { ReferenceScope } from "./reference-library-dialog";
 
 export type FidelityRunResult = { ok: boolean; note: string; error?: string };
 
 type Props = {
   bookId: string;
-  scope: ReferenceScope;
-  targetId: string;
+  // The profile this editor works on; its targetId decides which samples bind to it.
+  profile: StyleProfile;
   authorRules: string;
   samples: StyleSample[];
-  profile: StyleProfile | null;
   run: AssistRun | null;
   onSamplesChange: (next: StyleSample[]) => void;
   onProfileChange: (profile: StyleProfile) => void;
@@ -40,7 +40,7 @@ const SPLITS: SampleSplit[] = ["conditioning", "calibration", "evaluation"];
 const MAX_IMPORT_CHARS = 200000;
 
 export function StyleFidelityPanel({
-  bookId, targetId, authorRules, samples, profile, run,
+  bookId, profile, authorRules, samples, run,
   onSamplesChange, onProfileChange, onGenerateProfile, onRun,
 }: Props) {
   const [advanced, setAdvanced] = useState(false);
@@ -54,25 +54,27 @@ export function StyleFidelityPanel({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<null | "import" | "profile" | "run">(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const targetId = profile.targetId;
 
   const partitions = useMemo(() => partitionSamples(samples), [samples]);
-  const evidenceState = profile
-    ? `样段增强 · 档案第 ${profile.version} 版 · ${profile.sampleIds.length} 段`
-    : samples.length ? `样段增强准备中 · 已导入 ${samples.length} 段，尚未生成档案`
-      : "快速建议 · 未使用任何原文样段";
+  const evidenceState = profile.sampleIds.length
+    ? `已绑定 ${profile.sampleIds.length} 段样段 · 第 ${profile.version} 版`
+    : samples.length ? `已导入 ${samples.length} 段，尚未生成档案` : "尚无样段，可手写规则或导入样段";
+
+  function patchProfile(patch: Partial<StyleProfile>) { onProfileChange({ ...profile, ...patch }); }
 
   function applyImport(text: string, sourceTitle: string) {
     if (!text.trim()) { setError("请先粘贴或选择要整理的文本。"); return; }
     if (text.length > MAX_IMPORT_CHARS) { setError("文本超过 20 万字，请分段导入。"); return; }
     const result = importTextAsSamples({
       bookId, targetId, raw: text,
-      source: { kind, title: sourceTitle || "未命名导入", locator: locator.trim() || undefined, usageBasis },
+      source: { kind, title: sourceTitle || "未命名导入", locator: locator.trim() || undefined, usageBasis, author: profile.scope.author || undefined, work: profile.scope.work || undefined },
       split,
     });
     const merged = dedupeSamples([...samples, ...result.samples]);
     onSamplesChange(merged.kept);
     setNotes([...result.notes, ...(merged.dropped.length ? [`与已有样段重叠，未重复加入 ${merged.dropped.length} 段。`] : [])]);
-    setError(result.samples.length ? "" : "没有整理出可用样段，可用快速建议继续。");
+    setError(result.samples.length ? "" : "没有整理出可用样段，可先手写规则继续。");
     setRaw(""); setTitle(""); setLocator("");
   }
 
@@ -91,12 +93,14 @@ export function StyleFidelityPanel({
   // never becomes a finished profile.
   async function generateProfile() {
     const conditioning = partitions.conditioning;
-    if (!conditioning.length) { setError("先导入样段才能生成档案；也可以直接用上面的快速建议。"); return; }
+    if (!conditioning.length) { setError("先导入样段才能自动生成档案；也可以直接手写规则。"); return; }
     setBusy("profile"); setError(""); setNotes([]);
     try {
       const digest = buildSampleDigest(conditioning, 8000);
       const prompt = [
-        "请根据下面这些真实样段，抽取能直接指导写作的表达规则。",
+        profile.scope.author || profile.scope.work
+          ? `目标文风：${profileDisplayName(profile)}。请根据下面这些真实样段，抽取能直接指导写作的表达规则。`
+          : "请根据下面这些真实样段，抽取能直接指导写作的表达规则。",
         '只输出 JSON 对象：{"rules":[{"text":"具体规则","evidenceIds":["样段 ID"],"scene":"dialogue|daily|conflict|action|interior|environment|mixed"}],"gaps":["仍无法确认的特点"]}',
         "",
         digest.text,
@@ -108,12 +112,17 @@ export function StyleFidelityPanel({
       if (parsed.unparsed) { setError("模型没有返回可解析的档案（JSON 无效或被截断），未生成档案；样段已保留。"); return; }
       const next = buildStyleProfile({
         bookId, targetId, samples,
-        scope: { note: "作者整体倾向" },
+        scope: profile.scope,
         modelRules: parsed.rules,
         authorRules,
+        id: profile.id,
+        version: profile.version,
         previous: profile,
       });
       if (parsed.gaps.length) next.uncertainties.push(...parsed.gaps);
+      // Hand-written rules are the author's own instructions and survive every
+      // regeneration; only derived rules are replaced.
+      next.rules = [...profile.rules.filter((rule) => rule.origin === "author_written" && rule.text.trim()), ...next.rules];
       onProfileChange(next);
       setNotes([
         `已生成档案第 ${next.version} 版：${next.rules.length} 条规则。`,
@@ -125,8 +134,17 @@ export function StyleFidelityPanel({
     } finally { setBusy(null); }
   }
 
+  // A hand-written rule is the author's own instruction: no evidence ids, never
+  // labelled as measured or model-derived. It starts with placeholder text
+  // because empty-text rules are dropped by storage normalization.
+  function addManualRule() {
+    patchProfile({
+      rules: [...profile.rules, { id: `rule-author-${profile.rules.length + 1}-${Date.now()}`, text: "（填写你的规则）", layer: "semantic", origin: "author_written", evidenceIds: [] }],
+      derivedStale: true,
+    });
+  }
+
   async function runFidelity() {
-    if (!profile) { setError("先生成风格档案，才能做复核与精修。快速建议可以直接试写。"); return; }
     setBusy("run"); setError(""); setNotes([]);
     try {
       const result = await onRun({ ruleText: profileRulesToText(profile), profile, sceneRange: "chapter" });
@@ -137,17 +155,41 @@ export function StyleFidelityPanel({
 
   return <section className="assist-plan assist-fidelity-panel" aria-label="样段与风格档案">
     <header>
-      <div><strong>证据与风格档案</strong><small>{evidenceState}</small></div>
+      <div><strong>{profileDisplayName(profile)}</strong><small>{evidenceState}</small></div>
       <div className="assist-badges">
-        {profile ? <span>有证据规则</span> : <span>AI 初步归纳</span>}
+        {profile.stats ? <span>有证据规则</span> : <span>无实证样段</span>}
+        {profile.derivedStale ? <span>作者已修改</span> : null}
         {partitions.evaluation.length ? <span>评测样段 {partitions.evaluation.length} 段已隔离</span> : null}
       </div>
     </header>
 
+    <div className="assist-ident">
+      <label><span>目标作者（可改）</span><input aria-label="目标作者" value={profile.scope.author} onChange={(event) => patchProfile({ scope: { ...profile.scope, author: event.target.value.slice(0, 200) } })} placeholder="例如：金庸" /></label>
+      <label><span>目标作品（可改）</span><input aria-label="目标作品" value={profile.scope.work} onChange={(event) => patchProfile({ scope: { ...profile.scope, work: event.target.value.slice(0, 200) } })} placeholder="例如：天龙八部" /></label>
+      <label><span>备注</span><input aria-label="文风备注" value={profile.scope.note} onChange={(event) => patchProfile({ scope: { ...profile.scope, note: event.target.value.slice(0, 400) } })} placeholder="这个配置用来做什么" /></label>
+    </div>
+
+    <div className="assist-rules">
+      <strong>规则（可编辑 · 第 {profile.version} 版 · {profile.rules.length} 条）</strong>
+      <ol>{profile.rules.map((rule, index) => <li key={rule.id}>
+        <textarea aria-label={`档案规则 ${index + 1}`} value={rule.text}
+          onChange={(event) => patchProfile({ rules: profile.rules.map((entry) => entry.id === rule.id ? { ...entry, text: event.target.value } : entry), derivedStale: true })} />
+        <div className="assist-rule-meta">
+          <small>{rule.evidenceIds.length ? `证据：${rule.evidenceIds.join("、")}` : RULE_ORIGIN_LABELS[rule.origin]}</small>
+          <Button variant="ghost" size="icon" aria-label={`删除规则 ${index + 1}`} onClick={() => patchProfile({ rules: profile.rules.filter((entry) => entry.id !== rule.id), derivedStale: true })}><Trash2 /></Button>
+        </div>
+      </li>)}</ol>
+      <div className="assist-actions">
+        <Button variant="outline" size="sm" onClick={addManualRule}><Plus />手写一条规则</Button>
+      </div>
+    </div>
+
+    {profile.uncertainties.length > 0 && <ul className="assist-caveat" role="status">{profile.uncertainties.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul>}
+
     <div className="assist-run">
-      <span>默认只有快速建议：不导入样段也能继续，不会声称分析过原作。</span>
+      <span>粘贴一段目标作者/作品的原文，会自动清理、切分、去重并判断场景。</span>
       <Button variant="outline" size="sm" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}>
-        <ChevronDown />{advanced ? "收起样段与档案" : "导入样段增强（可选）"}
+        <ChevronDown />{advanced ? "收起样段库" : "导入与管理样段（可选）"}
       </Button>
     </div>
 
@@ -186,36 +228,25 @@ export function StyleFidelityPanel({
 
       <div className="assist-actions">
         <Button disabled={busy !== null || !partitions.conditioning.length} onClick={() => void generateProfile()}>
-          {busy === "profile" ? <LoaderCircle className="spin" /> : <Sparkles />}生成 / 更新风格档案
+          {busy === "profile" ? <LoaderCircle className="spin" /> : <Sparkles />}从样段自动提取规则
         </Button>
-        <span className="assist-footnote">档案只从条件样段提取，引用会标出样段 ID。</span>
+        <span className="assist-footnote">只从条件样段提取，引用会标出样段 ID；提取后手写的规则保持不变。</span>
       </div>
-
-      {profile && <div className="assist-rules">
-        <strong>档案第 {profile.version} 版 · {profile.rules.length} 条规则（可编辑）</strong>
-        <ol>{profile.rules.slice(0, 10).map((rule, index) => <li key={rule.id}>
-          <textarea aria-label={`档案规则 ${index + 1}`} value={rule.text}
-            onChange={(event) => onProfileChange({ ...profile, rules: profile.rules.map((entry) => entry.id === rule.id ? { ...entry, text: event.target.value } : entry), derivedStale: true })} />
-          <small>{rule.evidenceIds.length ? `证据：${rule.evidenceIds.join("、")}` : rule.origin === "model_prior" ? "模型判断，无实证" : ""}</small>
-        </li>)}</ol>
-      </div>}
-
-      {profile?.stats && <details className="assist-stats">
-        <summary>机械统计与口径（{profile.stats.samples} 段 / {profile.stats.hanChars} 汉字）</summary>
-        <ul>
-          <li>句长：中位数 {profile.stats.sentence.p50} 字，90 分位 {profile.stats.sentence.p90} 字，最长 {profile.stats.sentence.max} 字</li>
-          <li>段长：中位数 {profile.stats.paragraph.p50} 字，90 分位 {profile.stats.paragraph.p90} 字</li>
-          <li>对话段比例：{Math.round(profile.stats.dialogueParagraphRatio * 100)}%</li>
-          {profile.stats.basis.map((line) => <li key={line}>{line}</li>)}
-        </ul>
-      </details>}
-
-      {profile && profile.uncertainties.length > 0 && <ul className="assist-caveat" role="status">{profile.uncertainties.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul>}
     </>}
 
+    {profile?.stats && <details className="assist-stats">
+      <summary>机械统计与口径（{profile.stats.samples} 段 / {profile.stats.hanChars} 汉字）</summary>
+      <ul>
+        <li>句长：中位数 {profile.stats.sentence.p50} 字，90 分位 {profile.stats.sentence.p90} 字，最长 {profile.stats.sentence.max} 字</li>
+        <li>段长：中位数 {profile.stats.paragraph.p50} 字，90 分位 {profile.stats.paragraph.p90} 字</li>
+        <li>对话段比例：{Math.round(profile.stats.dialogueParagraphRatio * 100)}%</li>
+        {profile.stats.basis.map((line) => <li key={line}>{line}</li>)}
+      </ul>
+    </details>}
+
     <div className="assist-actions">
-      <Button variant="outline" disabled={busy !== null || !profile} onClick={() => void runFidelity()}>
-        {busy === "run" ? <LoaderCircle className="spin" /> : <WandSparkles />}复核并精修一次
+      <Button variant="outline" disabled={busy !== null || !profile.rules.length} onClick={() => void runFidelity()}>
+        {busy === "run" ? <LoaderCircle className="spin" /> : <WandSparkles />}用当前章试写并复核
       </Button>
       <span className="assist-footnote">先复核；只在发现主要问题时修订一次，最多调用 3 次，不会自动改正文。</span>
     </div>
@@ -227,7 +258,7 @@ export function StyleFidelityPanel({
 
     {notes.map((note) => <p className="reference-source-note" role="status" key={note}>{note}</p>)}
     {error && <p className="reference-error" role="alert">{error}</p>}
-    <p className="assist-footnote"><BookMarked />收藏参考与应用为本书文风是两件事；档案是派生显示，正式文风仍以「文笔文风」的文本为准。</p>
+    <p className="assist-footnote"><BookMarked />生成正文时会直接使用这份档案（含你手写的规则），修改后立即生效，无需重新应用。</p>
   </section>;
 }
 

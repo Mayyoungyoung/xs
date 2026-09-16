@@ -406,7 +406,14 @@ export function mechanicalStats(samples: StyleSample[]): StyleStats | null {
 // ------------------------------------------------------------- the profile
 
 export type StyleRuleLayer = "mechanical" | "semantic" | "chapter";
-export type StyleRule = { id: string; text: string; layer: StyleRuleLayer; origin: StyleEvidenceKind; evidenceIds: string[] };
+// A hand-written rule is the author's own instruction, distinct from model
+// judgement and from rules measured on real excerpts.
+export type StyleRuleOrigin = StyleEvidenceKind | "author_written";
+export const RULE_ORIGIN_LABELS: Record<StyleRuleOrigin, string> = {
+  primary_excerpt: "实证样段", critical_analysis: "评论分析", bibliographic_metadata: "书目/百科元数据",
+  model_prior: "模型判断，无实证", user_approved_output: "作者认可的 AI 输出", author_written: "作者手写",
+};
+export type StyleRule = { id: string; text: string; layer: StyleRuleLayer; origin: StyleRuleOrigin; evidenceIds: string[] };
 export type StyleProfile = {
   id: string;
   bookId: string;
@@ -428,6 +435,13 @@ export type StyleProfile = {
 
 export const STYLE_PROFILE_PROMPT_VERSION = "style-profile-v1";
 export const MIN_SAMPLES_FOR_PROFILE = 3;
+
+// What a profile is called in the UI: the author or work it targets, else the
+// author's own note, else an honest placeholder.
+export function profileDisplayName(profile: Pick<StyleProfile, "scope">): string {
+  if (profile.scope.author && profile.scope.work) return `${profile.scope.author} · ${profile.scope.work}`;
+  return profile.scope.author || profile.scope.work || profile.scope.note || "自定义文风";
+}
 
 export type BuildProfileInput = {
   bookId: string;
@@ -553,7 +567,7 @@ export function normalizeStyleProfile(input: unknown): StyleProfile | null {
       id: typeof rule.id === "string" ? rule.id.slice(0, 160) : `rule-${stableHash(rule.text)}`,
       text: rule.text.slice(0, 400),
       layer: rule.layer === "mechanical" || rule.layer === "chapter" ? rule.layer : "semantic",
-      origin: KINDS.includes(rule.origin as StyleEvidenceKind) ? rule.origin as StyleEvidenceKind : "model_prior",
+      origin: (KINDS.includes(rule.origin as StyleEvidenceKind) ? rule.origin : rule.origin === "author_written" ? "author_written" : "model_prior") as StyleRuleOrigin,
       evidenceIds: (Array.isArray(rule.evidenceIds) ? rule.evidenceIds : []).filter((id): id is string => typeof id === "string").slice(0, 40),
     }];
   }).slice(0, 80);

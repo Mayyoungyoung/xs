@@ -141,7 +141,10 @@ test("excerpts and profiles survive the storage schema, export and restart", () 
   assert.equal(parsed.workspaces.bk.styleSamples[0].source.usageBasis, "permitted_excerpt");
   const merged = mergeBookWorkspace(book, parsed.workspaces.bk);
   assert.equal(merged.styleSamples.length, 3);
-  assert.deepEqual(merged.styleProfiles.style.rules.map((rule) => rule.id), workspace.styleProfiles.style.rules.map((rule) => rule.id));
-  assert.deepEqual(mergeBookWorkspace(book, { styleSamples: merged.styleSamples, styleProfiles: merged.styleProfiles }).styleSamples, merged.styleSamples, "reload is idempotent");
-  assert.equal(merged.styleProfiles.style.sampleIds.length, 2, "the library keeps all 3 excerpts while the profile deduplicates the mirrored one");
+  const profileId = workspace.styleProfiles.style.id;
+  // Profiles are keyed by their own id after migration, not by the legacy "style" key.
+  assert.deepEqual(merged.styleProfiles[profileId].rules.map((rule) => rule.id), workspace.styleProfiles.style.rules.map((rule) => rule.id));
+  assert.equal(merged.activeStyleProfileId, profileId, "the migrated legacy profile stays active");
+  assert.deepEqual(mergeBookWorkspace(book, { styleSamples: merged.styleSamples, styleProfiles: merged.styleProfiles, activeStyleProfileId: merged.activeStyleProfileId }).styleSamples, merged.styleSamples, "reload is idempotent");
+  assert.equal(merged.styleProfiles[profileId].sampleIds.length, 2, "the library keeps all 3 excerpts while the profile deduplicates the mirrored one");
 });

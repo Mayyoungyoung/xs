@@ -78,6 +78,9 @@ export type BookWorkspace = {
   // Append-only versions, so a snapshot or candidate can still resolve the exact
   // profile it was produced from.
   styleProfileHistory: Record<string, StyleProfile[]>;
+  // The profile generation currently writes with (a profile id). Empty when no
+  // profile has been created yet.
+  activeStyleProfileId: string;
 };
 
 // Viewport/zoom preferences are stored per module and never touch revisions.
@@ -104,6 +107,7 @@ export function createBookWorkspace(book: BookProject): BookWorkspace {
     styleSamples: [],
     styleProfiles: {},
     styleProfileHistory: {},
+    activeStyleProfileId: "",
     plot: {
       instruction: `为《${book.title}》设计一条围绕核心冲突展开的支线，在中段与主线交汇，并在结局前回收。`,
       branches: [],
@@ -127,6 +131,7 @@ export type SavedWorkspaceInput = Partial<Omit<BookWorkspace, "threads" | "coPro
   styleSamples?: unknown;
   styleProfiles?: unknown;
   styleProfileHistory?: unknown;
+  activeStyleProfileId?: unknown;
 };
 
 export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInput | null): BookWorkspace {
@@ -147,17 +152,37 @@ export function mergeBookWorkspace(book: BookProject, saved?: SavedWorkspaceInpu
     view: normalizeView(saved.view),
     referenceAssist: normalizeAssistDrafts(saved.referenceAssist),
     styleSamples: normalizeStyleSamples(saved.styleSamples),
-    styleProfiles: normalizeStyleProfiles(saved.styleProfiles),
-    styleProfileHistory: normalizeProfileHistory(saved.styleProfileHistory),
+    ...migrateStyleProfiles(saved.styleProfiles, saved.styleProfileHistory, saved.activeStyleProfileId),
     plot: { ...base.plot, ...saved.plot, branches: saved.plot?.branches ?? base.plot.branches },
     versions: saved.versions?.length ? saved.versions : base.versions,
   };
 }
 
 
+// Old backups key profiles by targetId ("style"); the id-keyed form is the
+// canonical one. Re-keying is idempotent, and the active id falls back to the
+// migrated legacy entry or the single remaining profile.
+function migrateStyleProfiles(profilesInput: unknown, historyInput: unknown, savedActiveId?: unknown): Pick<BookWorkspace, "styleProfiles" | "styleProfileHistory" | "activeStyleProfileId"> {
+  const profiles = normalizeStyleProfiles(profilesInput);
+  const history = normalizeProfileHistory(historyInput);
+  const keyed: Record<string, StyleProfile> = {};
+  for (const profile of Object.values(profiles)) keyed[profile.id] = profile;
+  const rekeyedHistory: Record<string, StyleProfile[]> = {};
+  for (const versions of Object.values(history)) {
+    for (const version of versions) rekeyedHistory[version.id] = [...(rekeyedHistory[version.id] ?? []), version];
+  }
+  for (const [key, versions] of Object.entries(rekeyedHistory)) rekeyedHistory[key] = versions.sort((a, b) => b.version - a.version);
+  const ids = Object.keys(keyed);
+  const savedId = typeof savedActiveId === "string" ? savedActiveId : "";
+  const legacy = profiles.style?.id ?? "";
+  const activeStyleProfileId = keyed[savedId] ? savedId : keyed[legacy] ? legacy : ids.length === 1 ? ids[0] : "";
+  return { styleProfiles: keyed, styleProfileHistory: rekeyedHistory, activeStyleProfileId };
+}
+
 export function storySnapshot(workspace: BookWorkspace): StorySnapshot {
   const { idea, tags, references, assets, plot, chapters, activeChapterId } = workspace;
-  const styleConfig = buildStyleConfigRef(workspace.styleProfiles.style ?? null, assets.style ?? "", workspace.styleSamples);
+  const profile = workspace.styleProfiles[workspace.activeStyleProfileId] ?? null;
+  const styleConfig = buildStyleConfigRef(profile, assets.style ?? "", workspace.styleSamples);
   return structuredClone({ idea, tags, references, assets, plot, chapters, activeChapterId, ...(styleConfig ? { styleConfig } : {}) });
 }
 

@@ -9,8 +9,6 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { readSearchCredentials } from "@/lib/model-credentials";
-import { profileRulesToText, type StyleProfile, type StyleSample } from "@/lib/style-fidelity";
-import { StyleFidelityPanel } from "./style-fidelity-panel";
 import {
   DIMENSION_LABELS, ENTITY_KIND_LABELS, EVIDENCE_LABELS, MEDIUM_LABELS, mergeModelPlan, parseReferenceBrief,
   reviseStylePlan, stylePlanToRuleText, styleReferencePrompt, statusBadges,
@@ -45,13 +43,9 @@ type Props = {
   onGenerateStyle: (prompt: string) => Promise<string>;
   onTrialWrite: (ruleText: string) => Promise<string>;
   onApplyStyle: (ruleText: string, mode: "replace-all" | "append") => { ok: boolean; error?: string };
-  // Sample library and derived profile for the style flow.
-  styleSamples: StyleSample[];
-  styleProfile: StyleProfile | null;
-  onSamplesChange: (next: StyleSample[]) => void;
-  onProfileChange: (profile: StyleProfile) => void;
-  onGenerateProfile: (prompt: string) => Promise<string>;
-  onFidelityRun: (payload: { ruleText: string; profile: StyleProfile | null; sceneRange: "selection" | "chapter" }) => Promise<{ ok: boolean; note: string; error?: string }>;
+  // Style-scope only: pasted/uploaded text becomes style samples for the active
+  // profile instead of a library entry, so there is one sample store.
+  onImportStyleText?: (title: string, text: string) => { ok: boolean; note?: string; error?: string };
 };
 
 const scopeNames: Record<ReferenceScope, string> = { plot: "剧情结构", character: "人物设定", style: "文笔指纹", world: "世界观" };
@@ -73,10 +67,9 @@ type Entry = "ai" | "search" | "local";
 
 export function ReferenceLibraryDialog({
   open, onOpenChange, scope, selected, onAdd, onRemove,
-  bookId, assist, onAssistChange, currentStyle, onGenerateStyle, onTrialWrite, onApplyStyle,
-  styleSamples, styleProfile, onSamplesChange, onProfileChange, onGenerateProfile, onFidelityRun,
+  bookId, assist, onAssistChange, currentStyle, onGenerateStyle, onTrialWrite, onApplyStyle, onImportStyleText,
 }: Props) {
-  const [entry, setEntry] = useState<Entry>("ai");
+  const [entry, setEntry] = useState<Entry>(scope === "style" ? "local" : "ai");
   const [input, setInput] = useState(assist.input);
   const [running, setRunning] = useState<null | "assist" | "discuss" | "trial">(null);
   const [error, setError] = useState("");
@@ -97,10 +90,9 @@ export function ReferenceLibraryDialog({
   const fileInput = useRef<HTMLInputElement>(null);
 
   const plan = assist.plan;
-  // The applied text carries both the borrow plan and, when present, the rules
-  // derived from real excerpts with their evidence — the profile stays a derived
-  // view, this text remains the single official style.
-  const ruleText = useMemo(() => [plan ? stylePlanToRuleText(plan) : "", styleProfile ? profileRulesToText(styleProfile) : ""].filter(Boolean).join("\n\n"), [plan, styleProfile]);
+  // For non-style scopes the applied text is the borrow plan; the style scope
+  // has its own profile flow on the 文笔文风 page and no longer passes through here.
+  const ruleText = useMemo(() => (plan ? stylePlanToRuleText(plan) : ""), [plan]);
   const badges = useMemo(() => (plan ? statusBadges(briefOf(assist), assist.evidence) : []), [assist, plan]);
   const scoped = selected.filter((item) => item.scope === scope);
   const busy = running !== null;
@@ -265,6 +257,14 @@ export function ReferenceLibraryDialog({
     const text = pasteText.trim();
     if (!text) { setError("请先粘贴要借鉴的原文片段。"); return; }
     if (text.length > MAX_LOCAL_LENGTH) { setError(`粘贴内容超过 ${MAX_LOCAL_LENGTH / 10000} 万字，请截取代表性的原文片段。`); return; }
+    if (scope === "style" && onImportStyleText) {
+      const firstLine = text.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
+      const outcome = onImportStyleText(pasteTitle.trim() || firstLine.slice(0, 30) || "粘贴的原文片段", text);
+      if (!outcome.ok) { setError(outcome.error ?? "导入失败。"); return; }
+      if (outcome.note) setNotice(outcome.note);
+      setPasteTitle(""); setPasteText(""); setError("");
+      return;
+    }
     const firstLine = text.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
     attachProse(pasteTitle.trim() || firstLine.slice(0, 30) || "粘贴的原文片段", text);
     setPasteTitle(""); setPasteText(""); setError("");
@@ -280,6 +280,12 @@ export function ReferenceLibraryDialog({
       try { text = await file.text(); } catch { setError(`无法读取 ${file.name}`); continue; }
       if (!text.trim()) { setError(`${file.name} 是空文件。`); continue; }
       if (text.length > MAX_LOCAL_LENGTH) { setError(`${file.name} 超过 6 万字，请拆分后导入，避免截断材料。`); continue; }
+      if (scope === "style" && onImportStyleText) {
+        const outcome = onImportStyleText(file.name.replace(/\.[^.]+$/, ""), text);
+        if (!outcome.ok) { setError(outcome.error ?? `无法导入 ${file.name}`); continue; }
+        if (outcome.note) setNotice(outcome.note);
+        continue;
+      }
       const evidence: ReferenceEvidence = { evidenceId: `ev-file-${file.name}-${file.lastModified}`, kind: "prose", source: "本地文件", retrievedAt: new Date().toISOString(), retrieved: true, chars: text.length, note: "作者提供的文本样段，只分析这段范围。" };
       const reference: ReferenceItem = { id: `local-${file.name}-${file.lastModified}`, title: file.name.replace(/\.[^.]+$/, ""), kind: "local", summary: text, source: "本地文件", scope, evidence };
       onAdd(reference);
@@ -293,16 +299,18 @@ export function ReferenceLibraryDialog({
       <DialogHeader>
         <DialogTitle>添加{scopeNames[scope]}借鉴</DialogTitle>
         <DialogDescription>
-          输入作者名、作品名或一句自然语言，AI 会先识别对象、给出可调整的表达方案，再按需联网补充资料。搜索只是增强，不是前提。
+          {scope === "style"
+            ? "粘贴或导入目标作者/作品的原文片段，会自动整理为文风样段；文风规则在「文笔文风」页编辑。"
+            : "输入作者名、作品名或一句自然语言，AI 会先识别对象、给出可调整的表达方案，再按需联网补充资料。搜索只是增强，不是前提。"}
         </DialogDescription>
       </DialogHeader>
       <div className="reference-mode-tabs">
-        <button className={entry === "ai" ? "active" : ""} onClick={() => setEntry("ai")}><Sparkles size={16} />AI 帮我借鉴</button>
+        {scope !== "style" && <button className={entry === "ai" ? "active" : ""} onClick={() => setEntry("ai")}><Sparkles size={16} />AI 帮我借鉴</button>}
         <button className={entry === "search" ? "active" : ""} onClick={() => setEntry("search")}><Globe2 size={16} />自己检索</button>
         <button className={entry === "local" ? "active" : ""} onClick={() => setEntry("local")}><Upload size={16} />导入材料</button>
       </div>
 
-      {entry === "ai" && <div className="reference-assist">
+      {entry === "ai" && scope !== "style" && <div className="reference-assist">
         <label className="assist-input"><span>想借鉴谁、借鉴什么</span>
           <textarea aria-label="借鉴要求" value={input} maxLength={600} placeholder="例如：文笔参考余华，但人物和故事保持我的。" onChange={(event) => { setInput(event.target.value); updateDraft({ input: event.target.value }); }} />
         </label>
@@ -387,20 +395,6 @@ export function ReferenceLibraryDialog({
             {assist.applied && <small>上次应用：第 {assist.applied.version} 版 · {new Date(assist.applied.at).toLocaleString("zh-CN")}</small>}
           </div>}
         </section>}
-
-        <StyleFidelityPanel
-          bookId={bookId}
-          scope={scope}
-          targetId="style"
-          authorRules={currentStyle}
-          samples={styleSamples}
-          profile={styleProfile}
-          run={assist.run ?? null}
-          onSamplesChange={onSamplesChange}
-          onProfileChange={onProfileChange}
-          onGenerateProfile={onGenerateProfile}
-          onRun={onFidelityRun}
-        />
 
         {notice && <p className="reference-source-note" role="status">{notice}</p>}
         {error && <p className="reference-error" role="alert">{error}</p>}

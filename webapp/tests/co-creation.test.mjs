@@ -210,7 +210,7 @@ test("the context panel lists what the model actually receives and respects lock
   assert.equal(context.targetLabel, "章节正文 / 第 1 章");
   assert.deepEqual(context.locked, ["full"]);
   const labels = context.sections.map((section) => section.label);
-  assert.deepEqual(labels, ["当前目标", "作者锁定", "当前内容", "作者选中内容", "相关设定", "剧情事件", "相关前文", "讨论摘要", "待采纳候选", "借鉴资料"]);
+  assert.deepEqual(labels, ["当前目标", "作者锁定", "当前内容", "作者选中内容", "相关设定", "剧情事件", "相关前文", "讨论摘要", "待采纳候选", "本次生效文风", "场景匹配样段", "借鉴资料"]);
   assert.equal(context.sections.find((section) => section.label === "作者锁定").included, true);
   assert.match(context.sections.find((section) => section.label === "相关设定").detail, /世界观/);
   assert.equal(context.sections.find((section) => section.label === "剧情事件").detail, "本章推进目标：妹妹失踪");
